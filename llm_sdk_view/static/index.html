@@ -45,7 +45,10 @@
       <div id="log"></div>
       <textarea id="prompt" placeholder="Ask a current architecture question..."></textarea>
       <div class="controls">
-        <label>Model<input id="model" value="claude-sonnet-5"></label>
+        <label>Model
+          <select id="model"></select>
+          <span class="notice" id="contextWindow"></span>
+        </label>
         <label>Max output tokens
           <input id="maxTokens" type="number" value="16384" min="1">
           <span class="notice" id="maxTokensHint"></span>
@@ -53,20 +56,19 @@
         <label>System
           <input id="system" placeholder="omitted from the request when empty">
         </label>
+        <label>Effort
+          <select id="effort"></select>
+          <span class="notice" id="effortNote"></span>
+        </label>
         <label>Web search
           <select id="webSearch"><option value="true">ON</option><option value="false">OFF</option></select>
         </label>
         <label>Web search type
-          <select id="webSearchType">
-            <option value="web_search_20260318">web_search_20260318</option>
-            <option value="web_search_20250305">web_search_20250305</option>
-          </select>
+          <select id="webSearchType"></select>
+          <span class="notice" id="webSearchTypeNote"></span>
         </label>
         <label>Allowed callers
-          <select id="allowedCallers">
-            <option value="code_execution_20260120">code_execution_20260120</option>
-            <option value="direct">direct</option>
-          </select>
+          <select id="allowedCallers"></select>
         </label>
         <label>Response inclusion
           <select id="responseInclusion"><option value="excluded">excluded</option><option value="full">full</option></select>
@@ -80,7 +82,15 @@
           <select id="cacheControl"><option value="true">ON</option><option value="false">OFF</option></select>
           <span class="notice" id="ttlNote"></span>
         </label>
+        <label>Streaming
+          <select id="stream"><option value="true">ON</option><option value="false">OFF</option></select>
+          <span class="notice" id="streamNote"></span>
+        </label>
       </div>
+      <p class="status">Adaptive thinking: <b id="adaptiveThinking">-</b>
+        <span id="thinkingNote"></span></p>
+      <p class="status">Model data: <b id="modelDataSource">-</b>
+        <span id="modelDataNote"></span></p>
       <p class="status">Dynamic filtering: <b id="dynamicFiltering">active</b>
         <span id="dynamicFilteringNote"></span></p>
       <p class="blocked" id="blockedNote"></p>
@@ -94,8 +104,8 @@
   <script>
     const byId = (id) => document.getElementById(id);
     const log = byId('log');
-    const state = { sent: false, caps: null };
     const DYNAMIC = 'code_execution_20260120';
+    const state = { caps: null };
     let streaming = false;
 
     function addMessage(role, text) {
@@ -113,28 +123,42 @@
       return {
         session_id: 'default',
         text,
-        model: byId('model').value.trim(),
+        model: byId('model').value,
         max_tokens: Number(byId('maxTokens').value),
         system: byId('system').value,
+        effort: byId('effort').value,
         web_search: byId('webSearch').value === 'true',
         web_search_type: byId('webSearchType').value,
         allowed_callers: byId('allowedCallers').value,
         response_inclusion: byId('responseInclusion').value,
         max_uses: Number(byId('maxUses').value),
-        cache_control: byId('cacheControl').value === 'true'
+        cache_control: byId('cacheControl').value === 'true',
+        stream: byId('stream').value === 'true'
       };
     }
 
+    function setOptions(select, values, labels, disabled) {
+      select.innerHTML = '';
+      values.forEach((value) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = labels[value] || value;
+        option.disabled = !!disabled[value];
+        select.appendChild(option);
+      });
+    }
+
+    const fmt = (n) => (n === null || n === undefined) ? 'unknown' : n.toLocaleString('en-US');
+
     function refresh() {
+      const caps = state.caps;
       const on = byId('webSearch').value === 'true';
       ['webSearchType', 'allowedCallers', 'responseInclusion', 'maxUses'].forEach(
         (id) => { byId(id).disabled = !on; }
       );
-      // response_inclusion is only accepted by web_search_20260318, and only
-      // when the installed llm-anthropic can send it at all.
-      const inclusionOk = state.caps ? state.caps.response_inclusion : true;
-      byId('responseInclusion').disabled =
-        !on || byId('webSearchType').value !== 'web_search_20260318' || !inclusionOk;
+      // response_inclusion only reaches the request when the model's web
+      // search tool version accepts it and the plugin can send it.
+      byId('responseInclusion').disabled = !on || !caps.response_inclusion;
 
       let text, note, blocked = false;
       if (!on) {
@@ -142,13 +166,13 @@
         note = 'No web search tool is sent.';
       } else if (byId('allowedCallers').value === 'direct') {
         text = 'disabled';
-        blocked = !state.sent;
+        blocked = !caps.allowed_callers;
         note = blocked
           ? 'Direct search needs allowed_callers=["direct"], which the installed llm-anthropic cannot send. Sending is blocked instead of silently falling back.'
           : 'allowed_callers=["direct"] is sent, which turns dynamic filtering off.';
       } else {
         text = 'active';
-        note = state.sent
+        note = caps.allowed_callers
           ? 'allowed_callers=["' + DYNAMIC + '"] is sent.'
           : 'allowed_callers is not sent, so the API default ' + DYNAMIC + ' applies.';
       }
@@ -159,46 +183,120 @@
     }
 
     function apply(data) {
-      byId('maxTokens').max = data.model.max_tokens || '';
-      byId('maxTokensHint').textContent = data.model.max_tokens
-        ? 'at most ' + data.model.max_tokens + ' for ' + data.model.id
+      const caps = data.capabilities;
+      state.caps = caps;
+
+      byId('contextWindow').textContent = 'context window '
+        + fmt(caps.context_window) + ' tokens (Anthropic docs, verified ' + caps.verified + ')';
+      byId('maxTokens').max = caps.max_output_tokens || '';
+      byId('maxTokensHint').textContent = caps.max_output_tokens
+        ? 'at most ' + fmt(caps.max_output_tokens) + ' for ' + caps.id
         : '';
-      // llm-anthropic derives the tool version from the model, so only the
-      // version this model actually emits is selectable.
-      Array.from(byId('webSearchType').options).forEach((option) => {
-        const used = option.value === data.model.web_search_type;
-        option.disabled = !used;
-        option.textContent = used ? option.value : option.value + ' (not used by ' + data.model.id + ')';
-      });
-      if (byId('webSearchType').value !== data.model.web_search_type) {
-        byId('webSearchType').value = data.model.web_search_type;
-      }
-      Array.from(byId('allowedCallers').options).forEach((option) => {
-        if (option.value === data.allowed_callers.api_default) {
-          option.textContent = option.value + ' (API default'
-            + (data.allowed_callers.sent ? '' : ', not sent') + ')';
+      byId('ttlNote').textContent = data.cache_ttl.note;
+
+      // Streaming controls whether this page shows text as it arrives. It is
+      // not a provider parameter: the right pane shows whichever SDK method
+      // the plugin really calls, and says so.
+      byId('streamNote').textContent = data.transport.sdk_method === 'stream'
+        ? data.transport.streaming_note
+        : 'the installed plugin calls messages.create() for this model';
+
+      // Provenance: a fallback profile must never look like a live API result.
+      const src = data.model_data;
+      const label = {
+        'models-api': {disk: 'Models API (cached)', live: 'Models API (live)',
+                       'stale-disk': 'Models API (stale cache)'}[src.cache] || 'Models API',
+        fallback: 'fallback profile ' + src.profile_version
+      }[src.source] || src.source;
+      byId('modelDataSource').textContent = label;
+      byId('modelDataNote').textContent = src.source === 'models-api'
+        ? 'fetched ' + (src.fetched_at || 'unknown')
+        : 'Models API unavailable (' + (src.error || 'unknown') + ') - showing the '
+          + src.profile_version + ' profile, not live data';
+
+      // Adaptive thinking is a property of the model, shown read-only: the
+      // reasoning blocks the plugin asks for are display only and change no
+      // request parameter the form controls.
+      byId('adaptiveThinking').textContent = caps.thinking_mode === 'adaptive'
+        ? (caps.thinking_always_on ? 'yes (always on)' : 'yes')
+        : caps.thinking_mode;
+      byId('thinkingNote').textContent = caps.thinking_mode === 'adaptive'
+        ? 'reasoning blocks are display only; no form control changes them'
+        : 'this model uses extended thinking; no form control changes it';
+
+      // Effort: the levels come from the plugin, and "off" is only offered
+      // where llm-anthropic can really send thinking={"type": "disabled"}.
+      const effortLabels = {};
+      const effortDisabled = {};
+      caps.effort_options.forEach((value) => {
+        if (value === 'default') {
+          effortLabels[value] = caps.default_effort
+            ? 'default (model default: ' + caps.default_effort + ')'
+            : 'default';
+        } else if (value === 'off') {
+          effortLabels[value] = caps.can_disable_thinking
+            ? 'off (thinking disabled)'
+            : 'off (not supported: this model always thinks)';
+          effortDisabled[value] = !caps.can_disable_thinking;
         } else {
-          option.textContent = option.value;
+          effortLabels[value] = caps.supports_effort
+            ? value
+            : value + ' (not supported by this model)';
+          effortDisabled[value] = !caps.supports_effort;
         }
       });
-      byId('ttlNote').textContent = data.cache_ttl.note;
-      byId('responseInclusionNote').textContent = data.capabilities.response_inclusion
-        ? 'only sent for web_search_20260318'
-        : 'the installed llm-anthropic cannot send response_inclusion, so it is omitted';
-      state.sent = data.allowed_callers.sent;
-      state.caps = data.capabilities;
+      setOptions(byId('effort'), caps.effort_options, effortLabels, effortDisabled);
+      byId('effort').value = 'default';
+      byId('effortNote').textContent = caps.supports_effort
+        ? 'sent as output_config.effort'
+        : 'this model has no effort parameter, so only default/off apply';
+
+      // llm-anthropic derives the tool version from the model, so only the
+      // version this model actually emits is selectable.
+      const typeLabels = {};
+      const typeDisabled = {};
+      data.web_search_types.forEach((value) => {
+        const used = value === caps.web_search_type;
+        typeLabels[value] = used ? value : value + ' (not used by ' + caps.id + ')';
+        typeDisabled[value] = !used;
+      });
+      setOptions(byId('webSearchType'), data.web_search_types, typeLabels, typeDisabled);
+      byId('webSearchType').value = caps.web_search_type || data.web_search_types[0];
+      byId('webSearchTypeNote').textContent = caps.web_search_type
+        ? 'llm-anthropic picks this from the model'
+        : 'this model has no web search tool';
+
+      const callerLabels = {};
+      data.allowed_callers.options.forEach((value) => {
+        callerLabels[value] = value === data.allowed_callers.api_default
+          ? value + ' (API default' + (data.allowed_callers.sent ? '' : ', not sent') + ')'
+          : value;
+      });
+      setOptions(byId('allowedCallers'), data.allowed_callers.options, callerLabels, {});
+      byId('allowedCallers').value = data.allowed_callers.api_default;
+
+      byId('responseInclusionNote').textContent = caps.response_inclusion
+        ? 'sent for ' + caps.web_search_type
+        : 'not sent: ' + (caps.web_search_type === 'web_search_20260318'
+            ? 'the installed llm-anthropic cannot express it'
+            : caps.web_search_type + ' has no response_inclusion');
+
       refresh();
     }
 
     async function loadForm() {
-      const model = byId('model').value.trim() || 'claude-sonnet-5';
-      const response = await fetch('/api/form?model=' + encodeURIComponent(model));
+      const model = byId('model').value;
+      const query = model ? '?model=' + encodeURIComponent(model) : '';
+      const response = await fetch('/api/form' + query);
       const data = await response.json();
       if (data.error) {
-        byId('maxTokensHint').textContent = data.error;
         byId('blockedNote').textContent = data.error;
         byId('send').disabled = true;
         return;
+      }
+      if (!byId('model').options.length) {
+        setOptions(byId('model'), data.models, {}, {});
+        byId('model').value = data.model.id;
       }
       apply(data);
     }
@@ -238,7 +336,13 @@
             byId('dynamicFiltering').textContent = event.dynamic_filtering;
             byId('dynamicFilteringNote').textContent = 'read from the request that was sent';
           } else if (event.type === 'text') {
-            body.textContent += event.text;
+            // With streaming off there are no chunks; the reply arrives whole.
+            if (byId('stream').value === 'true') {
+              body.textContent += event.text;
+              log.scrollTop = log.scrollHeight;
+            }
+          } else if (event.type === 'done') {
+            body.textContent = event.text;
             log.scrollTop = log.scrollHeight;
           } else if (event.type === 'error') {
             body.innerHTML = '';

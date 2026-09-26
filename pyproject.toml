@@ -57,4 +57,4 @@ build-backend = "setuptools.build_meta"
 include = ["llm_sdk_view*"]
 
 [tool.setuptools.package-data]
-llm_sdk_view = ["static/*.html"]
+llm_sdk_view = ["static/*.html", "models.json"]

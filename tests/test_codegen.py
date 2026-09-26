@@ -1,72 +1,77 @@
+"""The renderer, driven by what llm-anthropic really builds.
+
+There is no hand-maintained request shape to compare against any more: the only
+input to the renderer is a ``model.build_kwargs()`` result, so the tests build
+one for real (offline, no transport involved) and check the rendering.
+"""
+
 import ast
 
+import llm
 import pytest
 
-from llm_sdk_view.codegen import anthropic_kwargs, render_anthropic_python
-from llm_sdk_view.models import AnthropicTurn, Message
+from llm_sdk_view import capabilities
+from llm_sdk_view.codegen import render_kwargs
+
+llm_anthropic = pytest.importorskip("llm_anthropic")
+from llm_anthropic import WebSearch  # noqa: E402
 
 
-def test_anthropic_request_has_four_required_capabilities():
-    turn = AnthropicTurn(messages=(Message(role="user", content="Hello"),))
-    kwargs = anthropic_kwargs(turn)
+def _built_kwargs(model_id: str = "claude-sonnet-5", cache: bool = True) -> dict:
+    caps = capabilities.capabilities_for(model_id)
+    model = llm.get_model(caps.llm_id)
+    prompt = llm.Prompt(
+        "Hello",
+        model=model,
+        options=model.Options(max_tokens=1024, cache=cache),
+        tools=[WebSearch(max_uses=1)],
+    )
+    return model.build_kwargs(prompt, None)
 
-    # Prompt caching lives on a content block, never at the top level of
-    # messages.create(), which is not a valid Anthropic parameter.
-    assert "cache_control" not in kwargs
+
+def test_rendered_code_is_valid_python():
+    ast.parse(render_kwargs(_built_kwargs()))
+
+
+def test_rendered_code_carries_the_request_values():
+    code = render_kwargs(_built_kwargs())
+
+    assert 'model="claude-sonnet-5"' in code
+    assert "max_tokens=1024" in code
+    assert '"name": "web_search"' in code
+    assert '"cache_control"' in code
+
+
+def test_cache_control_is_rendered_where_the_plugin_puts_it():
+    """Prompt caching lives on a content block, never at the top level."""
+    kwargs = _built_kwargs()
+    code = render_kwargs(kwargs)
+
+    assert "cache_control" not in code.split("messages=")[0]
     assert kwargs["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert kwargs["tools"] == [
-        {
-            "type": "web_search_20260318",
-            "name": "web_search",
-            "max_uses": 5,
-            "response_inclusion": "excluded",
-        }
-    ]
-    assert "allowed_callers" not in kwargs["tools"][0]
 
 
-def test_cache_control_lands_on_the_final_message_only():
-    turn = AnthropicTurn(
-        messages=(
-            Message(role="user", content="First"),
-            Message(role="assistant", content="Second"),
-            Message(role="user", content="Third"),
-        )
-    )
-    messages = anthropic_kwargs(turn)["messages"]
+def test_every_top_level_key_is_rendered():
+    kwargs = _built_kwargs()
+    code = render_kwargs(kwargs)
 
-    assert "cache_control" not in messages[0]["content"][-1]
-    assert "cache_control" not in messages[1]["content"][-1]
-    assert messages[2]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    for key in kwargs:
+        assert f"{key}=" in code
 
 
-def test_features_can_be_disabled():
-    turn = AnthropicTurn(
-        messages=(Message(role="user", content="Hello"),),
-        web_search=False,
-        prompt_cache=False,
-    )
-    kwargs = anthropic_kwargs(turn)
-    assert "tools" not in kwargs
-    assert all("cache_control" not in block for block in kwargs["messages"][0]["content"])
+def test_rendered_code_contains_no_secret():
+    code = render_kwargs(_built_kwargs())
 
-
-def test_generated_code_is_sdk_code_and_contains_no_secret():
-    turn = AnthropicTurn(
-        messages=(Message(role="user", content="Compare A and B"),),
-        response_inclusion="excluded",
-    )
-    code = render_anthropic_python(turn)
-
-    assert "client.messages.create(" in code
-    assert '"web_search_20260318"' in code
-    assert '"response_inclusion": "excluded"' in code
     assert "api_key=" not in code
     assert "ANTHROPIC_API_KEY" not in code
-    # Must be valid Python, not merely plausible-looking text.
+
+
+def test_booleans_and_numbers_render_as_python_not_json():
+    code = render_kwargs({"a": True, "b": False, "c": None, "d": 1.5, "e": 3})
+
+    assert "a=True" in code
+    assert "b=False" in code
+    assert "c=None" in code
+    assert "d=1.5" in code
+    assert "e=3" in code
     ast.parse(code)
-
-
-def test_rejects_unknown_response_inclusion():
-    with pytest.raises(ValueError):
-        AnthropicTurn(response_inclusion="sometimes")

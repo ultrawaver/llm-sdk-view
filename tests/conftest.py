@@ -6,9 +6,6 @@ real ``model.build_kwargs()`` - runs untouched, so a prepared turn is the
 request the provider would have received.
 """
 
-import inspect
-
-import llm
 import llm_anthropic
 import pytest
 
@@ -72,27 +69,45 @@ class _FakeStream:
 
 
 class _FakeMessages:
-    def __init__(self, recorder):
+    """The two SDK entry points a provider might use.
+
+    Which one the plugin picks is the thing under test, so both are recorded.
+    """
+
+    def __init__(self, recorder, transports):
         self.recorder = recorder
+        self.transports = transports
 
     def stream(self, **kwargs):
+        self.transports.append("stream")
         self.recorder.append(kwargs)
         return _FakeStream(kwargs, self.recorder)
 
+    def create(self, **kwargs):
+        self.transports.append("create")
+        self.recorder.append(kwargs)
+        return _FinalMessage()
+
 
 class _FakeClient:
-    def __init__(self, recorder, **kwargs):
+    def __init__(self, recorder, transports, **kwargs):
         self.recorder = recorder
-        self.messages = _FakeMessages(recorder)
+        self.messages = _FakeMessages(recorder, transports)
 
 
 @pytest.fixture
-def fake_provider(monkeypatch):
+def transports() -> list:
+    """The SDK methods the provider actually opened, in order."""
+    return []
+
+
+@pytest.fixture
+def fake_provider(monkeypatch, transports):
     """Replace the Anthropic transport, keep everything else real."""
     sent = []
 
     def factory(**kwargs):
-        return _FakeClient(sent, **kwargs)
+        return _FakeClient(sent, transports, **kwargs)
 
     monkeypatch.setattr(llm_anthropic, "Anthropic", factory)
     return sent
@@ -120,21 +135,12 @@ def session(make_session):
 
 
 @pytest.fixture
-def response_inclusion_supported() -> bool:
-    """Whether the installed llm-anthropic can send response_inclusion."""
-    from llm_anthropic import WebSearch
+def capabilities():
+    """The capability matrix entry for a model, read off the installed plugin."""
 
-    return "response_inclusion" in inspect.signature(WebSearch.__init__).parameters
+    def read(model_id: str):
+        from llm_sdk_view.capabilities import capabilities_for
 
-
-@pytest.fixture
-def prompt_capabilities():
-    """What the installed plugin can express, read off its own source."""
-
-    def read(model_id: str) -> dict:
-        model = llm.get_model(model_id)
-        from llm_sdk_view.chat import installed_capabilities
-
-        return installed_capabilities(model)
+        return capabilities_for(model_id)
 
     return read

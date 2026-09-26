@@ -94,6 +94,7 @@ Checked on 2026-09-26 against `llm-anthropic` main and against the
 |---|---|---|
 | `allowed_callers` | Not a `WebSearch` parameter at all. Omitting the field is what leaves the API default `code_execution_20260120` in place, so dynamic filtering is on. | Shows `code_execution_20260120 (API default)`, sends nothing, and refuses `direct` instead of silently leaving filtering on. Starts sending it automatically if the plugin gains the parameter. |
 | `cache_control` TTL | No TTL option exists; `{"type": "ephemeral"}` is hard-coded. | No TTL control at all, only a read-only note. The form must not offer a setting that cannot reach the request. |
+| A non-streaming `messages.create()` call | `execute()` always opens `messages.stream()`, even when LLM asked for a buffered response: the API rejects non-streaming requests whose `max_tokens` could run past ten minutes. | `Streaming ON/OFF` is offered as a UI presentation switch only, and the right pane renders `messages.stream()` in both modes with the reason stated. |
 
 ## Possible later contribution: LLM core
 

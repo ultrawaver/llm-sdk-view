@@ -1,6 +1,12 @@
-import json
+"""Render the provider request as Python source.
 
-from .models import AnthropicTurn
+There is exactly one input: the dictionary the execution path is about to hand
+to the Anthropic SDK. Nothing in this module is allowed to construct, default
+or "improve" that dictionary - a renderer that invents values would let the
+right pane drift from the request, which is the one thing it exists to prevent.
+"""
+
+import json
 
 
 def _python(value, indent: int = 1) -> str:
@@ -35,61 +41,29 @@ def _python(value, indent: int = 1) -> str:
     raise TypeError(f"Unsupported value: {type(value)!r}")
 
 
-def anthropic_messages(turn: AnthropicTurn) -> list[dict]:
-    """Build Anthropic `messages` in the shape llm-anthropic sends.
-
-    Content must be a list of blocks rather than a bare string: prompt caching
-    is expressed with `cache_control` on a block, so a string content field
-    could not carry it. `cache_control` goes on the last block of the final
-    message, which is where `llm_anthropic._Shared.build_messages` puts it when
-    `options.cache` is set.
-    """
-    messages = [
-        {"role": message.role, "content": [{"type": "text", "text": message.content}]}
-        for message in turn.messages
-    ]
-    if turn.prompt_cache and messages:
-        messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
-    return messages
-
-
-def anthropic_kwargs(turn: AnthropicTurn) -> dict:
-    kwargs = {
-        "model": turn.model,
-        "max_tokens": turn.max_tokens,
-        "messages": anthropic_messages(turn),
-    }
-    if turn.web_search:
-        # `web_search_20260318` is the version llm-anthropic emits for models
-        # with supports_adaptive_thinking. Dynamic content filtering is the
-        # default for this version and is preserved by never sending
-        # `allowed_callers`, which would force direct-only calling.
-        kwargs["tools"] = [
-            {
-                "type": "web_search_20260318",
-                "name": "web_search",
-                "max_uses": turn.max_searches,
-                "response_inclusion": turn.response_inclusion,
-            }
-        ]
-    return kwargs
-
-
-def render_kwargs(kwargs: dict) -> str:
+def render_kwargs(kwargs: dict, transport: str = "create", note: str | None = None) -> str:
     """Render SDK code from provider parameters.
 
     The input must be the dictionary the execution path actually sends, not a
     re-derivation of it, so that the right pane cannot drift from the request.
+    ``transport`` is the SDK method the plugin really calls - passing "create"
+    for a request that goes out as a stream would be a lie about the call.
     """
     arguments = ",\n".join(f"    {key}={_python(value)}" for key, value in kwargs.items())
+    header = "import anthropic\n\nclient = anthropic.Anthropic()\n"
+    if note:
+        header += "\n" + "".join(f"# {line}\n" for line in note.splitlines())
+    if transport == "stream":
+        return (
+            f"{header}\n"
+            "with client.messages.stream(\n"
+            f"{arguments},\n"
+            ") as stream:\n"
+            "    message = stream.get_final_message()\n"
+        )
     return (
-        "import anthropic\n\n"
-        "client = anthropic.Anthropic()\n\n"
+        f"{header}\n"
         "message = client.messages.create(\n"
         f"{arguments},\n"
         ")\n"
     )
-
-
-def render_anthropic_python(turn: AnthropicTurn) -> str:
-    return render_kwargs(anthropic_kwargs(turn))

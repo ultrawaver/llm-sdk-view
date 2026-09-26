@@ -12,6 +12,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from llm_sdk_view.app import app
+from llm_sdk_view.capabilities import capabilities_for, model_ids
 from llm_sdk_view.chat import (
     ALLOWED_CALLERS,
     RESPONSE_INCLUSIONS,
@@ -39,11 +40,14 @@ def test_form_defaults():
     assert options.max_tokens == 16384
     assert options.system == ""
     assert options.web_search is True
-    assert options.web_search_type == "web_search_20260318"
+    # None means "the version llm-anthropic gives this model", resolved by
+    # ChatSession from the capability matrix.
+    assert options.web_search_type is None
     assert options.allowed_callers == "code_execution_20260120"
     assert options.response_inclusion == "excluded"
     assert options.max_uses == 1
     assert options.cache_control is True
+    assert options.stream is True
 
 
 def test_form_schema_defaults_match_the_options():
@@ -53,20 +57,25 @@ def test_form_schema_defaults_match_the_options():
         "model": "claude-sonnet-5",
         "max_tokens": 16384,
         "system": "",
+        "effort": "default",
         "web_search": True,
         "web_search_type": "web_search_20260318",
         "allowed_callers": "code_execution_20260120",
         "response_inclusion": "excluded",
         "max_uses": 1,
         "cache_control": True,
+        "stream": True,
     }
+    assert schema["transport"]["sdk_method"] == "stream"
     assert schema["web_search_types"] == list(WEB_SEARCH_TYPES)
     assert schema["response_inclusions"] == list(RESPONSE_INCLUSIONS)
     assert schema["allowed_callers"]["options"] == list(ALLOWED_CALLERS)
     assert schema["allowed_callers"]["api_default"] == "code_execution_20260120"
     assert schema["model"]["id"] == "claude-sonnet-5"
     assert schema["model"]["sends"] == "claude-sonnet-5"
-    assert schema["model"]["max_tokens"] == llm.get_model("claude-sonnet-5").default_max_tokens
+    assert schema["model"]["max_tokens"] == 128000
+    assert schema["model"]["context_window"] == 1000000
+    assert schema["models"] == list(model_ids())
 
 
 def test_default_request_carries_the_default_values(make_session):
@@ -83,15 +92,13 @@ def test_default_request_carries_the_default_values(make_session):
 
 
 def test_model_id_is_a_real_registered_model():
-    llm.get_model(ChatOptions.model)
+    llm.get_model(capabilities_for(ChatOptions.model).llm_id)
 
 
 # --- every control reaches the request ------------------------------------
 
 
-def test_every_form_field_reaches_the_prepared_request(
-    make_session, response_inclusion_supported
-):
+def test_every_form_field_reaches_the_prepared_request(make_session, capabilities):
     chat = make_session(
         max_tokens=1024,
         system="Be terse",
@@ -109,7 +116,7 @@ def test_every_form_field_reaches_the_prepared_request(
     assert tool["type"] == "web_search_20260318"
     assert tool["max_uses"] == 3
     assert _last_block(kwargs)["cache_control"] == {"type": "ephemeral"}
-    if not response_inclusion_supported:
+    if not capabilities("claude-sonnet-5").response_inclusion:
         pytest.skip(
             "installed llm-anthropic has no response_inclusion; "
             "see docs/upstream-contributions.md"
@@ -196,7 +203,11 @@ def test_a_type_the_model_cannot_emit_is_refused(make_session, fake_provider):
 
 
 def test_an_older_model_emits_the_older_version(make_session):
-    chat = make_session(model="claude-opus-4.1", web_search_type="web_search_20250305")
+    """claude-haiku-4-5-20251001 has no adaptive thinking, so the plugin emits
+    the older tool version - and response_inclusion does not exist on it."""
+    chat = make_session(
+        model="claude-haiku-4-5-20251001", web_search_type="web_search_20250305"
+    )
     prepared = chat.prepare("Hi")
 
     tool = _web_search_tool(prepared.kwargs)
@@ -234,23 +245,23 @@ def test_negative_max_uses_is_rejected():
 # --- allowed_callers / dynamic filtering -----------------------------------
 
 
-def test_dynamic_filtering_is_active_by_default(make_session, prompt_capabilities):
+def test_dynamic_filtering_is_active_by_default(make_session, capabilities):
     chat = make_session()
     prepared = chat.prepare("Filter this")
 
     assert prepared.dynamic_filtering == "active"
     # Nothing is sent, so the API default code_execution_20260120 applies.
-    if not prompt_capabilities("claude-sonnet-5")["allowed_callers"]:
+    if not capabilities("claude-sonnet-5").allowed_callers:
         assert "allowed_callers" not in _web_search_tool(prepared.kwargs)
     assert "dynamic" not in prepared.code.lower()
 
 
 def test_direct_callers_either_disables_filtering_or_is_refused(
-    make_session, fake_provider, prompt_capabilities
+    make_session, fake_provider, capabilities
 ):
     chat = make_session(allowed_callers="direct")
 
-    if prompt_capabilities("claude-sonnet-5")["allowed_callers"]:
+    if capabilities("claude-sonnet-5").allowed_callers:
         prepared = chat.prepare("Direct search")
         assert _web_search_tool(prepared.kwargs)["allowed_callers"] == ["direct"]
         assert prepared.dynamic_filtering == "disabled"
@@ -270,10 +281,8 @@ def test_unknown_allowed_callers_is_rejected():
 # --- response_inclusion -----------------------------------------------------
 
 
-def test_response_inclusion_excluded_and_full(
-    make_session, response_inclusion_supported
-):
-    if not response_inclusion_supported:
+def test_response_inclusion_excluded_and_full(make_session, capabilities):
+    if not capabilities("claude-sonnet-5").response_inclusion:
         pytest.skip(
             "installed llm-anthropic has no response_inclusion; "
             "see docs/upstream-contributions.md"
@@ -288,9 +297,9 @@ def test_response_inclusion_excluded_and_full(
 
 
 def test_response_inclusion_is_dropped_when_the_plugin_cannot_send_it(
-    make_session, prompt_capabilities
+    make_session, capabilities
 ):
-    if prompt_capabilities("claude-sonnet-5")["response_inclusion"]:
+    if capabilities("claude-sonnet-5").response_inclusion:
         pytest.skip("installed llm-anthropic can send response_inclusion")
     prepared = make_session(response_inclusion="excluded").prepare("Hi")
 
@@ -328,8 +337,8 @@ def test_cache_control_off_sends_nothing(make_session, fake_provider):
 # --- max_tokens --------------------------------------------------------------
 
 
-def test_max_tokens_above_the_model_ceiling_is_rejected(make_session):
-    ceiling = llm.get_model("claude-sonnet-5").default_max_tokens
+def test_max_tokens_above_the_model_ceiling_is_rejected(make_session, capabilities):
+    ceiling = capabilities("claude-sonnet-5").max_output_tokens
 
     with pytest.raises(ValueError, match="max_tokens"):
         make_session(max_tokens=ceiling + 1)
@@ -343,11 +352,9 @@ def test_max_tokens_must_be_positive():
 # --- TTL ----------------------------------------------------------------------
 
 
-def test_the_installed_plugin_has_no_cache_ttl(prompt_capabilities):
+def test_the_installed_plugin_has_no_cache_ttl(capabilities):
     """There is no TTL control because llm-anthropic cannot send a TTL."""
-    capabilities = prompt_capabilities("claude-sonnet-5")
-
-    assert capabilities["cache_ttl"] is False
+    assert capabilities("claude-sonnet-5").cache_ttl is False
 
 
 def test_form_schema_offers_no_ttl_control():
@@ -420,3 +427,46 @@ def test_chat_endpoint_applies_web_search_off(monkeypatch, fake_provider):
     assert "tools" not in response.json()["kwargs"]
     assert "web_search" not in response.json()["code"]
     assert "tools" not in fake_provider[0]
+
+
+# --- the verification itself -------------------------------------------------
+
+
+def test_a_request_that_drifts_from_the_form_is_refused(make_session, monkeypatch):
+    """The build_kwargs() check has to bite, not just exist."""
+    chat = make_session()
+    original = chat.model.build_kwargs
+
+    def drop_cache_control(prompt, conversation):
+        kwargs = original(prompt, conversation)
+        for message in kwargs["messages"]:
+            for block in message["content"]:
+                block.pop("cache_control", None)
+        return kwargs
+
+    monkeypatch.setattr(chat.model, "build_kwargs", drop_cache_control)
+    with pytest.raises(ValueError, match="cache_control"):
+        chat.prepare("Hi")
+
+
+def test_a_request_with_the_wrong_model_is_refused(make_session, monkeypatch):
+    chat = make_session()
+    original = chat.model.build_kwargs
+
+    def wrong_model(prompt, conversation):
+        kwargs = original(prompt, conversation)
+        kwargs["model"] = "claude-something-else"
+        return kwargs
+
+    monkeypatch.setattr(chat.model, "build_kwargs", wrong_model)
+    with pytest.raises(ValueError, match="model does not match"):
+        chat.prepare("Hi")
+
+
+def test_no_hand_maintained_request_renderer_survives():
+    """The renderer must take build_kwargs() output and nothing else."""
+    from llm_sdk_view import codegen
+
+    assert not hasattr(codegen, "anthropic_kwargs")
+    assert not hasattr(codegen, "anthropic_messages")
+    assert not hasattr(codegen, "render_anthropic_python")

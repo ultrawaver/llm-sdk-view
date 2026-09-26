@@ -43,6 +43,39 @@
 - No prompt cache TTL control: `llm-anthropic` hard-codes
   `cache_control={"type": "ephemeral"}` and exposes no TTL option.
 
+### Added on the model capability and streaming step
+
+- `stream` control (ON/OFF). ON shows text as it arrives; OFF buffers the turn
+  and delivers the finished reply. Both modes send identical provider
+  parameters, and `stream` never reaches the request.
+- Completion now reads the reply from the final accumulated Message, so the
+  bubble, the returned text and the recorded conversation agree even when
+  streaming was used.
+- The right pane renders the transport `llm-anthropic` really uses,
+  `client.messages.stream(...)`, in both modes. A buffered turn is not rendered
+  as a `messages.create()` that never happens; the reason is stated in the code.
+- Model facts come from the Anthropic Models API when a key is present -
+  model list, `max_input_tokens`, `max_tokens`, thinking and effort
+  capabilities - cached on disk and refreshed in the background so the page
+  never waits for the network. Without it, the versioned fallback profile in
+  `llm_sdk_view/models.json` is used and labelled as a fallback.
+- `llm_sdk_view/capabilities.py` holds one `ModelCapabilities` structure per
+  model; the UI branches on capability flags, never on a model id.
+- Model dropdown, context window display, per-model output ceiling validation,
+  and an `effort` control (`default`, the plugin's levels, `off`) that is
+  disabled where the plugin cannot honour it.
+
+### Fixed after re-reviewing the previous step
+
+- Removed `/api/preview`, `AnthropicTurn` and the hand-maintained
+  `anthropic_kwargs()` renderer. They were a second request model that could
+  drift from `build_kwargs()`: they hard-coded `web_search_20260318` for models
+  that send `web_search_20250305`, ignored `system`, `effort` and
+  `max_uses=0`, and used stale defaults. The renderer now takes a
+  `build_kwargs()` result and nothing else.
+- `prepare()` now also verifies the model id, `max_tokens` and prompt caching
+  against the built request, not just the tool fields.
+
 ### Added on the conversation branch
 
 - `llm_sdk_view/chat.py`: a `ChatSession` that runs turns through

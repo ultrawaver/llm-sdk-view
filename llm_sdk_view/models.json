@@ -1,0 +1,44 @@
+{
+  "profile_version": "2026-09-26",
+  "profile_source": "Anthropic models overview, https://platform.claude.com/docs/en/about-claude/models/overview (read 2026-09-26), cross-checked against the installed llm-anthropic register_models()",
+  "profile_role": "fallback only. Anthropic's Models API is the primary source for the model list, max_input_tokens (context window), max_tokens (output ceiling) and the thinking/effort capabilities. Everything here is used only when that API is unavailable, and is labelled as a fallback wherever it is shown.",
+  "narrow_rules": [
+    "Default effort per model: not exposed by the Models API, so it can only come from Anthropic's published specs.",
+    "Whether thinking can be disabled: not exposed by the Models API; taken from llm-anthropic's always_thinks.",
+    "Dynamic filtering: web_search_20260318 keeps the API default allowed_callers=code_execution_20260120, so the field is omitted rather than sent."
+  ],
+  "models": {
+    "claude-fable-5-1": {
+      "llm_id": "anthropic/claude-fable-5-1",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "thinking_mode": "adaptive",
+      "thinking_always_on": true,
+      "default_effort": "high"
+    },
+    "claude-opus-5-5": {
+      "llm_id": "anthropic/claude-opus-5-5",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "thinking_mode": "adaptive",
+      "thinking_always_on": true,
+      "default_effort": "medium"
+    },
+    "claude-sonnet-5": {
+      "llm_id": "claude-sonnet-5",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "thinking_mode": "adaptive",
+      "thinking_always_on": false,
+      "default_effort": "high"
+    },
+    "claude-haiku-4-5-20251001": {
+      "llm_id": "anthropic/claude-haiku-4-5-20251001",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "thinking_mode": "extended",
+      "thinking_always_on": false,
+      "default_effort": null
+    }
+  }
+}

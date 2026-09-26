@@ -13,13 +13,44 @@ Browser UI
   -> Anthropic Messages API
 ```
 
-## Canonical turn specification
+## One source of request truth
 
-The form, generated SDK code, and future execution path must share one typed turn specification. Code examples must never be maintained as independent templates that can drift from execution.
+The form, generated SDK code, and execution path must share one request: the
+dictionary `model.build_kwargs()` returns. Code examples must never be
+maintained as independent templates that can drift from execution, so:
 
-## Initial request path
+- `llm_sdk_view/codegen.py` renders a `build_kwargs()` result and cannot build
+  a request of its own;
+- every form value is checked against the request that was actually built, and
+  a turn is refused when the two disagree;
+- the static `/api/preview` endpoint was removed for exactly this reason: it
+  rendered a hand-maintained request shape rather than the real one.
 
-The first scaffold only generates equivalent Anthropic Python SDK code. Model execution is intentionally deferred until the provider-facing values can be observed and tested.
+## Model capability matrix
+
+Model facts come from three ranked sources, resolved in
+`llm_sdk_view/capabilities.py`:
+
+1. The **Anthropic Models API** — model list, `max_input_tokens` (context
+   window), `max_tokens` (output ceiling), and the thinking/effort
+   capabilities. Read through the Anthropic SDK (never through `llm`, so
+   nothing lands in the prompt log), cached on disk, refreshed in the
+   background so the page never waits for the network.
+2. The **fallback profile** `llm_sdk_view/models.json` — a versioned snapshot
+   of Anthropic's published specs for the four current models, used only when
+   the API is unavailable and always labelled as a fallback.
+3. The **installed llm-anthropic** — what can actually go on the wire: tool
+   version per model, whether thinking can be disabled, which tool options
+   exist.
+
+Only narrow rules the Models API does not expose are hard-coded: default effort
+per model, whether thinking can be switched off, and how dynamic filtering maps
+onto `allowed_callers`. Nothing in the UI branches on a model id.
+
+## Request path
+
+The chat pane runs a real `llm.Conversation` through `llm-anthropic` and streams
+the response; the right pane shows the request that run was about to send.
 
 ## First provider contract
 
@@ -51,10 +82,11 @@ this repository:
 generated code but is not yet sendable; see
 [upstream contributions](upstream-contributions.md).
 
-The right-hand pane is a request preview, not a byte-for-byte capture of what
-the plugin sends. `llm-anthropic` also adds `extra_body.temperature` and a
-`thinking` block, which the canonical turn specification does not model yet.
-Tests assert equality only on the four contract fields.
+The right-hand pane is the request `llm-anthropic` built, not a
+reconstruction of it: `llm-anthropic` adds `extra_body.temperature` and, for
+thinking models, a `thinking` block, and both appear in the rendered code
+because they are in the dictionary that was sent. Tests assert the rendered
+call evaluates back to exactly that dictionary.
 
 ## Upstream boundary
 

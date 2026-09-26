@@ -22,8 +22,13 @@ Anthropic's official Python SDK.
   over `/api/chat/stream` as server-sent events.
 - The right pane renders the `anthropic` Python SDK call from
   `model.build_kwargs()` — the dictionary `llm-anthropic` passes to
-  `client.messages.create()`. There is no second copy of the request.
-- `/api/preview` still renders a single turn without executing anything.
+  `client.messages.create()`. There is no second copy of the request: the
+  renderer takes that dictionary and nothing else.
+- Model facts come from the [Anthropic Models
+  API](https://platform.claude.com/docs/en/about-claude/models/overview) when a
+  key is present (cached on disk, refreshed in the background), and from a
+  versioned fallback profile when it is not. The UI always says which one it is
+  showing.
 - If no Anthropic key is available, the turn fails locally and nothing is sent.
 - Offline tests drive the real LLM Python API with a faked transport: they
   assert history, streaming, the four Anthropic behaviours, and that the code

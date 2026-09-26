@@ -6,6 +6,7 @@ repository, and a scaffold claim about them is worthless until it is checked
 against the version that is actually installed.
 """
 
+import ast
 import importlib.metadata
 import inspect
 
@@ -16,8 +17,7 @@ llm_anthropic = pytest.importorskip("llm_anthropic")
 
 from llm_anthropic import WebSearch  # noqa: E402
 
-from llm_sdk_view.codegen import anthropic_kwargs  # noqa: E402
-from llm_sdk_view.models import AnthropicTurn, Message  # noqa: E402
+from llm_sdk_view.codegen import render_kwargs  # noqa: E402
 
 TARGET_MODEL = "claude-sonnet-5"
 
@@ -89,8 +89,12 @@ def test_upstream_prompt_caching_shape():
     assert messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
 
 
-def test_codegen_matches_upstream_request_shape():
-    """The generated request must agree with what llm-anthropic really sends."""
+def test_renderer_reproduces_the_upstream_request():
+    """The right pane renders build_kwargs() output, so it cannot drift.
+
+    Every top-level key the plugin produced has to appear in the rendered code
+    with the same value; there is no second request model to compare against.
+    """
     model = llm.get_model(TARGET_MODEL)
     upstream = model.build_kwargs(
         llm.Prompt(
@@ -101,12 +105,10 @@ def test_codegen_matches_upstream_request_shape():
         ),
         None,
     )
-    ours = anthropic_kwargs(
-        AnthropicTurn(messages=(Message(role="user", content="Hello"),), max_searches=5)
-    )
+    code = render_kwargs(upstream)
+    call = ast.parse(code).body[-1].value
+    rendered = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
 
-    assert ours["messages"] == upstream["messages"]
-    # Everything except the field we still need upstream to accept.
-    assert {k: v for k, v in ours["tools"][0].items() if k != "response_inclusion"} == (
-        upstream["tools"][0]
-    )
+    # The rendered call has to evaluate back to exactly what was built.
+    assert rendered == upstream
+    assert '"type": "web_search_20260318"' in code

@@ -17,7 +17,9 @@ def test_first_turn_reaches_the_left_pane(session):
     assert events[0]["type"] == "prepared"
     assert [e["text"] for e in events if e["type"] == "text"] == ["Hello", " world"]
     assert events[-1] == {"type": "done", "text": "Hello world"}
-    assert "client.messages.create(" in events[0]["code"]
+    # The installed plugin sends through the streaming transport, so that is
+    # what the right pane has to show.
+    assert "client.messages.stream(" in events[0]["code"]
 
 
 def test_second_turn_carries_the_full_history(session, fake_provider):
@@ -43,9 +45,7 @@ def test_right_pane_matches_the_request_that_was_sent(session, fake_provider):
         assert value in result["code"]
 
 
-def test_prepared_request_keeps_the_four_anthropic_behaviours(
-    session, response_inclusion_supported
-):
+def test_prepared_request_keeps_the_four_anthropic_behaviours(session, capabilities):
     prepared = session.prepare("Check the four behaviours")
 
     tool = next(t for t in prepared.kwargs["tools"] if t["name"] == "web_search")
@@ -55,7 +55,7 @@ def test_prepared_request_keeps_the_four_anthropic_behaviours(
     assert prepared.kwargs["messages"][-1]["content"][-1]["cache_control"] == {
         "type": "ephemeral"
     }
-    if response_inclusion_supported:
+    if capabilities("claude-sonnet-5").response_inclusion:
         assert tool["response_inclusion"] == "excluded"
         assert '"response_inclusion": "excluded"' in prepared.code
     else:

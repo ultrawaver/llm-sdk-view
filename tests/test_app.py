@@ -9,15 +9,12 @@ def test_health():
     assert response.json() == {"ok": True, "project": "llm-sdk-view"}
 
 
-def test_preview():
-    response = TestClient(app).post(
-        "/api/preview",
-        json={
-            "messages": [{"role": "user", "content": "Hello"}],
-            "response_inclusion": "excluded",
-        },
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["execution"] == "disabled-in-initial-scaffold"
-    assert data["kwargs"]["tools"][0]["type"] == "web_search_20260318"
+def test_there_is_no_second_request_template():
+    """The removed /api/preview rendered a hand-maintained request shape.
+
+    Its whole purpose was a second copy of the request, which could drift from
+    the one llm-anthropic builds, so it must not come back.
+    """
+    response = TestClient(app).post("/api/preview", json={"messages": []})
+
+    assert response.status_code == 404

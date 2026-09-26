@@ -8,30 +8,12 @@ from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .chat import ChatOptions, ChatSession, MissingKeyError, form_schema
-from .codegen import anthropic_kwargs, render_anthropic_python
-from .models import AnthropicTurn, Message
 
 STATIC = Path(__file__).parent / "static"
 
 # In-memory sessions. Nothing is persisted: a page reload starts a new
 # conversation rather than resurrecting one from SQLite.
 SESSIONS: dict[str, ChatSession] = {}
-
-
-def _turn_from_payload(payload: dict) -> AnthropicTurn:
-    messages = tuple(
-        Message(role=item["role"], content=item["content"])
-        for item in payload.get("messages", [])
-    )
-    return AnthropicTurn(
-        model=payload.get("model", "claude-sonnet-5"),
-        max_tokens=int(payload.get("max_tokens", 4096)),
-        messages=messages,
-        web_search=bool(payload.get("web_search", True)),
-        max_searches=int(payload.get("max_searches", 5)),
-        response_inclusion=payload.get("response_inclusion", "excluded"),
-        prompt_cache=bool(payload.get("prompt_cache", True)),
-    )
 
 
 def _options_from_payload(payload: dict) -> ChatOptions:
@@ -45,12 +27,15 @@ def _options_from_payload(payload: dict) -> ChatOptions:
         model=payload.get("model", defaults.model),
         max_tokens=int(payload.get("max_tokens", defaults.max_tokens)),
         system=str(payload.get("system", defaults.system) or ""),
+        effort=payload.get("effort", defaults.effort),
         web_search=bool(payload.get("web_search", defaults.web_search)),
         web_search_type=payload.get("web_search_type", defaults.web_search_type),
         allowed_callers=payload.get("allowed_callers", defaults.allowed_callers),
         response_inclusion=payload.get("response_inclusion", defaults.response_inclusion),
         max_uses=int(payload.get("max_uses", defaults.max_uses)),
         cache_control=bool(payload.get("cache_control", defaults.cache_control)),
+        # Presentation only: whether the UI receives text as it arrives.
+        stream=bool(payload.get("stream", defaults.stream)),
     )
 
 
@@ -70,21 +55,6 @@ def _session(payload: dict) -> ChatSession:
 
 async def index(request: Request) -> HTMLResponse:
     return HTMLResponse((STATIC / "index.html").read_text("utf-8"))
-
-
-async def preview(request: Request) -> JSONResponse:
-    try:
-        turn = _turn_from_payload(await request.json())
-    except (KeyError, TypeError, ValueError) as ex:
-        return JSONResponse({"error": str(ex)}, status_code=400)
-    return JSONResponse(
-        {
-            "sdk": "anthropic-python",
-            "code": render_anthropic_python(turn),
-            "kwargs": anthropic_kwargs(turn),
-            "execution": "disabled-in-initial-scaffold",
-        }
-    )
 
 
 async def chat(request: Request) -> JSONResponse:
@@ -141,7 +111,6 @@ def create_app() -> Starlette:
         routes=[
             Route("/", index),
             Route("/api/form", form),
-            Route("/api/preview", preview, methods=["POST"]),
             Route("/api/chat", chat, methods=["POST"]),
             Route("/api/chat/stream", chat_stream, methods=["POST"]),
             Route("/health", health),
