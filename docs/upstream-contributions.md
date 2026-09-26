@@ -48,17 +48,31 @@ llm -m claude-sonnet-5 \
 3. `README.md`
    - Document the option in the Web Search section.
 
-### Prepared, not submitted
+### Submitted upstream
 
-The patch above exists on a branch of a personal fork:
+The patch above was published as a pull request on 2026-09-26:
 
+- upstream PR: <https://github.com/simonw/llm-anthropic/pull/95> (open)
 - fork: <https://github.com/ultrawaver/llm-anthropic>
 - branch: `web-search-response-inclusion`
 - commit: `1fe612526d89b1f381a6e480a3d32e05614103dd`
 
-No pull request has been opened against `simonw/llm-anthropic`. This repository
-does not copy that code; when the branch's commit is installed the project
-starts emitting `response_inclusion` with no source change of its own.
+This repository does not copy that code; when the branch's commit is installed
+the project starts emitting `response_inclusion` with no source change of its
+own. Until the PR is merged and released, `llm-anthropic` 0.29 remains unable to
+express the option, and the corresponding assertions here skip rather than fail.
+
+### What changes here once upstream merges
+
+1. Replace the pinned fork commit in `.github/workflows/test.yml` with the plain
+   PyPI dependency, using a lower bound on the first release that carries the
+   option.
+2. Tighten `tests/test_upstream_contract.py` so a missing `response_inclusion`
+   fails instead of skipping.
+3. Update this file to record the released version.
+
+Until then nothing in this repository depends on the branch being merged: the
+default configuration degrades to three of the four behaviours.
 
 ### Out of scope for this PR
 
