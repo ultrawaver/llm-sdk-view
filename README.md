@@ -8,24 +8,29 @@ each turn. The first provider target is Anthropic through
 [`llm-anthropic`](https://github.com/simonw/llm-anthropic), which uses
 Anthropic's official Python SDK.
 
-> **Status: early scaffold.** What works today is the local server, the two-pane
-> shell, the canonical turn model, and a deterministic Anthropic Python SDK code
-> generator. **There is no working chat pane and no model execution yet**: the
-> right-hand pane previews the request that would be sent, and no paid API call
-> is made anywhere in this repository or its tests.
+> **Status: first conversation slice.** The chat pane now runs a real
+> multi-turn conversation through `llm.Conversation` and `llm-anthropic`, and
+> the right pane renders the parameters that path actually built. **No test in
+> this repository contacts a provider**: the Anthropic transport is faked, so
+> no API key is needed and no paid call is made. Running the app against the
+> real API requires your own key, configured the usual LLM way.
 
 ## What actually runs today
 
 - `llm sdk-view` starts a local ASGI server on `127.0.0.1`.
-- The left pane edits a turn; the right pane renders the equivalent
-  `anthropic` Python SDK call as text.
-- `/api/preview` returns the generated code and the request dictionary. It
-  never contacts a provider.
-- Offline tests assert the request shape against the installed
-  `llm-anthropic`, with no network and no API key.
+- The left pane sends a message into an `llm.Conversation`; replies stream back
+  over `/api/chat/stream` as server-sent events.
+- The right pane renders the `anthropic` Python SDK call from
+  `model.build_kwargs()` — the dictionary `llm-anthropic` passes to
+  `client.messages.create()`. There is no second copy of the request.
+- `/api/preview` still renders a single turn without executing anything.
+- If no Anthropic key is available, the turn fails locally and nothing is sent.
+- Offline tests drive the real LLM Python API with a faked transport: they
+  assert history, streaming, the four Anthropic behaviours, and that the code
+  matches the request that was sent.
 
-Not implemented: real multi-turn conversation, streaming into the left pane,
-SQLite-backed history in the UI, and any paid or authenticated model call.
+Not implemented: SQLite-backed history in the UI, any provider other than
+Anthropic, and any paid or authenticated call in the test suite.
 
 ## Target behaviour
 
@@ -38,9 +43,11 @@ The first Anthropic integration is expected to prove these four behaviours:
 
 Their current status against `llm-anthropic` is recorded in
 [`docs/upstream-contributions.md`](docs/upstream-contributions.md). Items 1, 2
-and 4 are already properties of the plugin and are asserted by offline tests.
-Item 3 is expressed in generated code but is **not sendable yet**: the installed
-plugin has no way to emit it, so it is unverified at runtime.
+and 4 are already properties of the released plugin and are asserted by offline
+tests. Item 3 needs a plugin that accepts `response_inclusion`; the released
+`llm-anthropic` does not, so CI on this branch installs a pinned commit of the
+contribution branch and the assertion is skipped when that capability is
+absent.
 
 ## Requirements
 

@@ -24,3 +24,13 @@
 - Added offline contract tests that assert the four required Anthropic
   behaviours against the installed `llm-anthropic`.
 - Bumped `actions/checkout` to v7 and `actions/setup-python` to v7 in CI.
+
+### Added on the conversation branch
+
+- `llm_sdk_view/chat.py`: a `ChatSession` that runs turns through
+  `llm.Conversation` and `llm-anthropic`, streaming text events out.
+- `/api/chat` and `/api/chat/stream` (server-sent events).
+- The right pane now renders `model.build_kwargs()` output instead of a second,
+  hand-maintained rendering of the turn.
+- Offline tests covering multi-turn history, streaming, missing-key handling
+  and the four Anthropic behaviours, using a faked Anthropic transport.

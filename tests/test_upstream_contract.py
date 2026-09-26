@@ -51,13 +51,29 @@ def test_web_search_uses_20260318_without_forcing_direct_callers():
     assert "allowed_callers" not in spec
 
 
-def test_web_search_does_not_expose_response_inclusion_yet():
-    """The gap that requires an upstream PR.
+def test_web_search_response_inclusion_state():
+    """What the installed llm-anthropic can actually do with
+    `response_inclusion`.
 
-    When llm-anthropic gains `response_inclusion`, this test fails and the
-    upstream patch is no longer needed - delete it rather than relaxing it.
+    The released plugin cannot express it at all; the contribution branch can.
+    Either way this project must never show a value the installed plugin has
+    no way to send, so the assertion adapts to what is installed rather than
+    asserting a fixed answer.
     """
-    assert "response_inclusion" not in inspect.signature(WebSearch.__init__).parameters
+    if "response_inclusion" not in inspect.signature(WebSearch.__init__).parameters:
+        pytest.skip(
+            "installed llm-anthropic has no response_inclusion - the gap "
+            "described in docs/upstream-contributions.md"
+        )
+    model = llm.get_model(TARGET_MODEL)
+    spec = WebSearch(max_uses=5, response_inclusion="excluded").tool_spec(model)
+    assert spec["type"] == "web_search_20260318"
+    assert spec["response_inclusion"] == "excluded"
+    # Only web_search_20260318 accepts it, so an older model must fail loudly
+    # instead of silently dropping the value.
+    older = llm.get_model("claude-opus-4.1")
+    with pytest.raises(ValueError):
+        WebSearch(response_inclusion="excluded").tool_spec(older)
 
 
 def test_upstream_prompt_caching_shape():

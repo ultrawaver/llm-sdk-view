@@ -17,6 +17,8 @@ def _python(value, indent: int = 1) -> str:
         return "None"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        return repr(value)
     if isinstance(value, list):
         if not value:
             return "[]"
@@ -73,8 +75,12 @@ def anthropic_kwargs(turn: AnthropicTurn) -> dict:
     return kwargs
 
 
-def render_anthropic_python(turn: AnthropicTurn) -> str:
-    kwargs = anthropic_kwargs(turn)
+def render_kwargs(kwargs: dict) -> str:
+    """Render SDK code from provider parameters.
+
+    The input must be the dictionary the execution path actually sends, not a
+    re-derivation of it, so that the right pane cannot drift from the request.
+    """
     arguments = ",\n".join(f"    {key}={_python(value)}" for key, value in kwargs.items())
     return (
         "import anthropic\n\n"
@@ -83,3 +89,7 @@ def render_anthropic_python(turn: AnthropicTurn) -> str:
         f"{arguments},\n"
         ")\n"
     )
+
+
+def render_anthropic_python(turn: AnthropicTurn) -> str:
+    return render_kwargs(anthropic_kwargs(turn))

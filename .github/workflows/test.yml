@@ -20,5 +20,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -e '.[test]'
+      # Pinned to an exact commit of the contribution branch, because the
+      # released llm-anthropic cannot express response_inclusion yet. Replace
+      # with the plain PyPI dependency once it is merged upstream.
+      - run: pip install 'git+https://github.com/ultrawaver/llm-anthropic@1fe612526d89b1f381a6e480a3d32e05614103dd'
       - run: pytest
       - run: ruff check .

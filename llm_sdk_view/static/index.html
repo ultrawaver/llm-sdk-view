@@ -10,17 +10,23 @@
     body { margin: 0; min-height: 100vh; background: #10141b; color: #e8edf2; }
     header { padding: 14px 18px; border-bottom: 1px solid #2d3540; font-weight: 700; }
     main { display: grid; grid-template-columns: 1fr 1fr; min-height: calc(100vh - 50px); }
-    section { padding: 18px; min-width: 0; }
+    section { padding: 18px; min-width: 0; display: flex; flex-direction: column; }
     section + section { border-left: 1px solid #2d3540; background: #0b0f14; }
     h2 { margin-top: 0; font-size: 16px; }
     textarea, input, select, button { font: inherit; }
-    textarea { width: 100%; min-height: 180px; resize: vertical; padding: 12px; }
+    textarea { width: 100%; min-height: 110px; resize: vertical; padding: 12px; }
     .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
     label { display: grid; gap: 5px; font-size: 13px; color: #aab6c3; }
     input, select { padding: 8px; }
     button { padding: 10px 14px; cursor: pointer; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid #2d3540; border-radius: 8px; min-height: 280px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid #2d3540; border-radius: 8px; min-height: 280px; flex: 1; margin: 0; }
     .notice { color: #9fb7d0; font-size: 13px; }
+    #log { flex: 1; overflow-y: auto; border: 1px solid #2d3540; border-radius: 8px; padding: 12px; min-height: 200px; }
+    .msg { margin-bottom: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .msg .who { font-size: 12px; color: #7f8c99; text-transform: uppercase; letter-spacing: .04em; }
+    .msg.user .who { color: #8fd0ff; }
+    .msg.assistant .who { color: #9ee6b4; }
+    .error { color: #ff9b9b; }
     @media (max-width: 850px) { main { grid-template-columns: 1fr; } section + section { border-left: 0; border-top: 1px solid #2d3540; } }
   </style>
 </head>
@@ -29,7 +35,10 @@
   <main>
     <section>
       <h2>Chat</h2>
-      <p class="notice">Initial scaffold: generate the equivalent SDK code without making a paid API call.</p>
+      <p class="notice">Each turn goes through <code>llm.Conversation</code> and
+        <code>llm-anthropic</code>. The right pane shows the request that will
+        actually be sent.</p>
+      <div id="log"></div>
       <textarea id="prompt" placeholder="Ask a current architecture question..."></textarea>
       <div class="controls">
         <label>Model<input id="model" value="claude-sonnet-5"></label>
@@ -40,30 +49,81 @@
         </label>
         <label><span>Prompt cache</span><select id="promptCache"><option value="true">enabled</option><option value="false">disabled</option></select></label>
       </div>
-      <button id="preview">Update SDK code</button>
+      <button id="send">Send</button>
     </section>
     <section>
       <h2>Anthropic Python SDK</h2>
-      <pre id="code">Enter a message and click “Update SDK code”.</pre>
+      <pre id="code">Send a message to see the equivalent SDK call.</pre>
     </section>
   </main>
   <script>
     const byId = (id) => document.getElementById(id);
-    byId('preview').addEventListener('click', async () => {
-      const payload = {
+    const log = byId('log');
+    let streaming = false;
+
+    function addMessage(role, text) {
+      const div = document.createElement('div');
+      div.className = 'msg ' + role;
+      div.innerHTML = '<div class="who"></div><div class="body"></div>';
+      div.querySelector('.who').textContent = role;
+      div.querySelector('.body').textContent = text;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+      return div.querySelector('.body');
+    }
+
+    function payload(text) {
+      return {
+        session_id: 'default',
+        text,
         model: byId('model').value,
         max_tokens: Number(byId('maxTokens').value),
         max_searches: Number(byId('maxSearches').value),
         response_inclusion: byId('responseInclusion').value,
         prompt_cache: byId('promptCache').value === 'true',
-        web_search: true,
-        messages: [{ role: 'user', content: byId('prompt').value }]
+        web_search: true
       };
-      const response = await fetch('/api/preview', {
-        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(payload)
+    }
+
+    byId('send').addEventListener('click', async () => {
+      if (streaming) return;
+      const text = byId('prompt').value.trim();
+      if (!text) return;
+      streaming = true;
+      addMessage('user', text);
+      byId('prompt').value = '';
+      const body = addMessage('assistant', '');
+
+      const response = await fetch('/api/chat/stream', {
+        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(payload(text))
       });
-      const data = await response.json();
-      byId('code').textContent = data.code || data.error || 'Unknown error';
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          const event = JSON.parse(part.slice(6));
+          if (event.type === 'prepared') {
+            byId('code').textContent = event.code;
+          } else if (event.type === 'text') {
+            body.textContent += event.text;
+            log.scrollTop = log.scrollHeight;
+          } else if (event.type === 'error') {
+            body.innerHTML = '';
+            body.className = 'error';
+            body.textContent = event.error === 'missing_api_key'
+              ? 'No Anthropic key found. Nothing was sent. Set one with: llm keys set anthropic'
+              : event.error;
+          }
+        }
+      }
+      streaming = false;
     });
   </script>
 </body>

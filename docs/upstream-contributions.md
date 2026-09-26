@@ -48,6 +48,18 @@ llm -m claude-sonnet-5 \
 3. `README.md`
    - Document the option in the Web Search section.
 
+### Prepared, not submitted
+
+The patch above exists on a branch of a personal fork:
+
+- fork: <https://github.com/ultrawaver/llm-anthropic>
+- branch: `web-search-response-inclusion`
+- commit: `1fe612526d89b1f381a6e480a3d32e05614103dd`
+
+No pull request has been opened against `simonw/llm-anthropic`. This repository
+does not copy that code; when the branch's commit is installed the project
+starts emitting `response_inclusion` with no source change of its own.
+
 ### Out of scope for this PR
 
 - `llm` core: no change is needed. `llm.ServerSideTool` and
