@@ -24,6 +24,7 @@
     pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid #2d3540; border-radius: 8px; min-height: 280px; flex: 1; margin: 0; }
     .notice, .status { color: #9fb7d0; font-size: 13px; margin: 6px 0; }
     .status b { color: #e8edf2; }
+    .tag { font-size: 12px; color: #ffc27a; }
     .blocked { color: #ffc27a; font-size: 13px; margin: 6px 0; min-height: 18px; }
     #log { flex: 1; overflow-y: auto; border: 1px solid #2d3540; border-radius: 8px; padding: 12px; min-height: 200px; }
     .msg { margin-bottom: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -56,6 +57,14 @@
         <label>System
           <input id="system" placeholder="omitted from the request when empty">
         </label>
+        <label>Thinking
+          <select id="thinking"></select>
+          <span class="notice" id="thinkingNote"></span>
+        </label>
+        <label>Thinking budget tokens
+          <input id="budgetTokens" type="number" disabled>
+          <span class="notice" id="budgetNote"></span>
+        </label>
         <label>Effort
           <select id="effort"></select>
           <span class="notice" id="effortNote"></span>
@@ -69,6 +78,7 @@
         </label>
         <label>Allowed callers
           <select id="allowedCallers"></select>
+          <span class="notice" id="allowedCallersNote"></span>
         </label>
         <label>Response inclusion
           <select id="responseInclusion"><option value="excluded">excluded</option><option value="full">full</option></select>
@@ -83,15 +93,15 @@
           <span class="notice" id="ttlNote"></span>
         </label>
         <label>Streaming
-          <select id="stream"><option value="true">ON</option><option value="false">OFF</option></select>
+          <select id="stream"><option value="ON">ON</option><option value="OFF">OFF</option></select>
           <span class="notice" id="streamNote"></span>
         </label>
       </div>
-      <p class="status">Adaptive thinking: <b id="adaptiveThinking">-</b>
-        <span id="thinkingNote"></span></p>
+      <p class="status">Context: <b id="contextUsage">-</b>
+        <span id="contextNote"></span></p>
       <p class="status">Model data: <b id="modelDataSource">-</b>
         <span id="modelDataNote"></span></p>
-      <p class="status">Dynamic filtering: <b id="dynamicFiltering">active</b>
+      <p class="status">Dynamic filtering: <b id="dynamicFiltering">-</b>
         <span id="dynamicFilteringNote"></span></p>
       <p class="blocked" id="blockedNote"></p>
       <button id="send">Send</button>
@@ -104,8 +114,7 @@
   <script>
     const byId = (id) => document.getElementById(id);
     const log = byId('log');
-    const DYNAMIC = 'code_execution_20260120';
-    const state = { caps: null };
+    const state = { data: null, caps: null, blocked: false, fits: null };
     let streaming = false;
 
     function addMessage(role, text) {
@@ -126,29 +135,95 @@
         model: byId('model').value,
         max_tokens: Number(byId('maxTokens').value),
         system: byId('system').value,
+        thinking: byId('thinking').value,
         effort: byId('effort').value,
         web_search: byId('webSearch').value === 'true',
         web_search_type: byId('webSearchType').value,
         allowed_callers: byId('allowedCallers').value,
         response_inclusion: byId('responseInclusion').value,
         max_uses: Number(byId('maxUses').value),
-        cache_control: byId('cacheControl').value === 'true',
-        stream: byId('stream').value === 'true'
+        cache_control: byId('cacheControl').value === 'true'
       };
     }
 
-    function setOptions(select, values, labels, disabled) {
+    function setOptions(select, options, labels) {
       select.innerHTML = '';
-      values.forEach((value) => {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = labels[value] || value;
-        option.disabled = !!disabled[value];
-        select.appendChild(option);
+      options.forEach((option) => {
+        const el = document.createElement('option');
+        el.value = option.value;
+        el.textContent = labels[option.value] || option.value;
+        el.disabled = !!option.disabled;
+        select.appendChild(el);
       });
     }
 
     const fmt = (n) => (n === null || n === undefined) ? 'unknown' : n.toLocaleString('en-US');
+
+    function effortLabels() {
+      const control = state.data.controls.effort;
+      const off = byId('thinking').value === 'off';
+      const labels = {};
+      control.options.forEach((option) => {
+        const blocked = off && option.blocked_without_thinking;
+        labels[option.value] = option.value === 'default'
+          ? (state.caps.default_effort
+              ? 'default (model default: ' + state.caps.default_effort + ')'
+              : 'default')
+          : option.value + (blocked ? ' (rejected with thinking off)' : '');
+      });
+      return labels;
+    }
+
+    function applyEffortState() {
+      const control = state.data.controls.effort;
+      const off = byId('thinking').value === 'off';
+      const labels = effortLabels();
+      const options = control.options.map((option) => ({
+        value: option.value,
+        // A level Anthropic rejects with thinking off is not selectable.
+        disabled: !state.caps.supports_effort || (off && option.blocked_without_thinking)
+      }));
+      setOptions(byId('effort'), options, labels);
+      byId('effort').disabled = !state.caps.supports_effort;
+      if (byId('effort').selectedOptions[0] && byId('effort').selectedOptions[0].disabled) {
+        byId('effort').value = 'default';
+      }
+      byId('effortNote').textContent = state.caps.supports_effort
+        ? '[' + control.status + '] sent as output_config.effort'
+        : '[' + control.status + '] ' + control.note;
+    }
+
+    function applyThinkingState() {
+      const thinking = state.data.controls.thinking;
+      const budget = state.data.controls.budget_tokens;
+      const on = byId('thinking').value === 'on';
+
+      byId('budgetTokens').value = budget.value === null ? '' : budget.value;
+      byId('budgetTokens').disabled = true;
+      byId('budgetNote').textContent = (budget.value === null || !on)
+        ? '[' + budget.status + '] ' + budget.note
+        : '[' + budget.status + '] sent as thinking.budget_tokens; ' + budget.note;
+
+      const control = state.data.controls.max_tokens;
+      byId('maxTokens').min = control.min_by_thinking[byId('thinking').value] || 1;
+      byId('maxTokensHint').textContent = '[' + control.status + '] ' + control.note
+        + (on && budget.value !== null
+            ? '; must stay above the ' + budget.value + ' token thinking budget'
+            : '');
+    }
+
+    function showContext(context) {
+      if (!context) return;
+      const percent = context.percent === null ? '' : ' (' + context.percent + '%)';
+      byId('contextUsage').textContent =
+        fmt(context.tokens) + ' / ' + fmt(context.limit) + ' tokens' + percent;
+      byId('contextNote').textContent =
+        'source: ' + context.source + ' · limit source: ' + context.limit_source
+        + ' · ' + fmt(context.reserved) + ' reserved for the reply'
+        + (context.fits === false ? ' · does not fit: lower max_tokens or start a new conversation' : '');
+      if (context.fits !== undefined) state.fits = context.fits;
+      byId('send').disabled = state.blocked || state.fits === false;
+    }
 
     function refresh() {
       const caps = state.caps;
@@ -156,52 +231,44 @@
       ['webSearchType', 'allowedCallers', 'responseInclusion', 'maxUses'].forEach(
         (id) => { byId(id).disabled = !on; }
       );
-      // response_inclusion only reaches the request when the model's web
-      // search tool version accepts it and the plugin can send it.
-      byId('responseInclusion').disabled = !on || !caps.response_inclusion;
+      byId('responseInclusion').disabled = !on
+        || state.data.controls.response_inclusion.status !== 'Editable';
 
-      let text, note, blocked = false;
-      if (!on) {
-        text = 'off';
-        note = 'No web search tool is sent.';
-      } else if (byId('allowedCallers').value === 'direct') {
-        text = 'disabled';
-        blocked = !caps.allowed_callers;
-        note = blocked
-          ? 'Direct search needs allowed_callers=["direct"], which the installed llm-anthropic cannot send. Sending is blocked instead of silently falling back.'
-          : 'allowed_callers=["direct"] is sent, which turns dynamic filtering off.';
-      } else {
-        text = 'active';
-        note = caps.allowed_callers
-          ? 'allowed_callers=["' + DYNAMIC + '"] is sent.'
-          : 'allowed_callers is not sent, so the API default ' + DYNAMIC + ' applies.';
-      }
-      byId('dynamicFiltering').textContent = text;
-      byId('dynamicFilteringNote').textContent = note;
-      byId('blockedNote').textContent = blocked ? note : '';
-      byId('send').disabled = blocked;
+      const callerControl = state.data.controls.allowed_callers;
+      const chosen = byId('allowedCallers').value;
+      const off = byId('allowedCallers').value === 'direct';
+      byId('allowedCallersNote').textContent = off
+        ? '[' + 'API supported · not exposed by llm-anthropic' + '] sending is blocked: '
+          + 'the request would still use the API default'
+        : '[' + callerControl.status + '] ' + callerControl.note;
+      state.blocked = off;
+      byId('blockedNote').textContent = off ? byId('allowedCallersNote').textContent : '';
+      byId('send').disabled = state.blocked || state.fits === false;
     }
 
     function apply(data) {
+      state.data = data;
       const caps = data.capabilities;
       state.caps = caps;
+      state.fits = data.context ? data.context.fits : null;
 
       byId('contextWindow').textContent = 'context window '
-        + fmt(caps.context_window) + ' tokens (Anthropic docs, verified ' + caps.verified + ')';
+        + fmt(caps.context_window) + ' tokens · ' + caps.context_window_source;
       byId('maxTokens').max = caps.max_output_tokens || '';
-      byId('maxTokensHint').textContent = caps.max_output_tokens
-        ? 'at most ' + fmt(caps.max_output_tokens) + ' for ' + caps.id
-        : '';
-      byId('ttlNote').textContent = data.cache_ttl.note;
+      byId('maxTokens').value = data.defaults.max_tokens;
 
-      // Streaming controls whether this page shows text as it arrives. It is
-      // not a provider parameter: the right pane shows whichever SDK method
-      // the plugin really calls, and says so.
-      byId('streamNote').textContent = data.transport.sdk_method === 'stream'
-        ? data.transport.streaming_note
-        : 'the installed plugin calls messages.create() for this model';
+      byId('ttlNote').textContent = '[' + data.controls.cache_control.ttl.status + '] '
+        + data.controls.cache_control.ttl.value + ' · ' + data.controls.cache_control.ttl.note;
 
-      // Provenance: a fallback profile must never look like a live API result.
+      // Streaming is not a choice here: llm-anthropic always opens a stream.
+      const streamControl = data.controls.stream;
+      setOptions(byId('stream'), streamControl.options, {
+        ON: 'ON', OFF: 'OFF (API supported · not used by llm-anthropic)'
+      });
+      byId('stream').value = 'ON';
+      byId('stream').disabled = true;
+      byId('streamNote').textContent = '[' + streamControl.status + '] ' + streamControl.note;
+
       const src = data.model_data;
       const label = {
         'models-api': {disk: 'Models API (cached)', live: 'Models API (live)',
@@ -214,73 +281,40 @@
         : 'Models API unavailable (' + (src.error || 'unknown') + ') - showing the '
           + src.profile_version + ' profile, not live data';
 
-      // Adaptive thinking is a property of the model, shown read-only: the
-      // reasoning blocks the plugin asks for are display only and change no
-      // request parameter the form controls.
-      byId('adaptiveThinking').textContent = caps.thinking_mode === 'adaptive'
-        ? (caps.thinking_always_on ? 'yes (always on)' : 'yes')
-        : caps.thinking_mode;
-      byId('thinkingNote').textContent = caps.thinking_mode === 'adaptive'
-        ? 'reasoning blocks are display only; no form control changes them'
-        : 'this model uses extended thinking; no form control changes it';
-
-      // Effort: the levels come from the plugin, and "off" is only offered
-      // where llm-anthropic can really send thinking={"type": "disabled"}.
-      const effortLabels = {};
-      const effortDisabled = {};
-      caps.effort_options.forEach((value) => {
-        if (value === 'default') {
-          effortLabels[value] = caps.default_effort
-            ? 'default (model default: ' + caps.default_effort + ')'
-            : 'default';
-        } else if (value === 'off') {
-          effortLabels[value] = caps.can_disable_thinking
-            ? 'off (thinking disabled)'
-            : 'off (not supported: this model always thinks)';
-          effortDisabled[value] = !caps.can_disable_thinking;
-        } else {
-          effortLabels[value] = caps.supports_effort
-            ? value
-            : value + ' (not supported by this model)';
-          effortDisabled[value] = !caps.supports_effort;
-        }
+      // Thinking: its own control, with the official mode and default state.
+      const thinkingControl = data.controls.thinking;
+      setOptions(byId('thinking'), thinkingControl.options, {
+        on: 'ON (' + caps.thinking_mode + ')', off: 'OFF'
       });
-      setOptions(byId('effort'), caps.effort_options, effortLabels, effortDisabled);
-      byId('effort').value = 'default';
-      byId('effortNote').textContent = caps.supports_effort
-        ? 'sent as output_config.effort'
-        : 'this model has no effort parameter, so only default/off apply';
+      byId('thinking').value = thinkingControl.value;
+      byId('thinking').disabled = thinkingControl.status !== 'Editable';
+      byId('thinkingNote').textContent = '[' + thinkingControl.status + '] ' + thinkingControl.note;
 
-      // llm-anthropic derives the tool version from the model, so only the
-      // version this model actually emits is selectable.
-      const typeLabels = {};
-      const typeDisabled = {};
-      data.web_search_types.forEach((value) => {
-        const used = value === caps.web_search_type;
-        typeLabels[value] = used ? value : value + ' (not used by ' + caps.id + ')';
-        typeDisabled[value] = !used;
-      });
-      setOptions(byId('webSearchType'), data.web_search_types, typeLabels, typeDisabled);
-      byId('webSearchType').value = caps.web_search_type || data.web_search_types[0];
-      byId('webSearchTypeNote').textContent = caps.web_search_type
-        ? 'llm-anthropic picks this from the model'
-        : 'this model has no web search tool';
+      applyEffortState();
+      applyThinkingState();
 
+      const typeControl = data.controls.web_search_type;
+      setOptions(byId('webSearchType'), typeControl.options, {});
+      byId('webSearchType').value = typeControl.value || '';
+      byId('webSearchType').disabled = true;
+      byId('webSearchTypeNote').textContent = '[' + typeControl.status + '] ' + typeControl.note;
+
+      const callerControl = data.controls.allowed_callers;
       const callerLabels = {};
-      data.allowed_callers.options.forEach((value) => {
-        callerLabels[value] = value === data.allowed_callers.api_default
-          ? value + ' (API default' + (data.allowed_callers.sent ? '' : ', not sent') + ')'
-          : value;
+      callerControl.options.forEach((option) => {
+        callerLabels[option.value] = option.value + ' (' + option.note + ')';
       });
-      setOptions(byId('allowedCallers'), data.allowed_callers.options, callerLabels, {});
-      byId('allowedCallers').value = data.allowed_callers.api_default;
+      setOptions(byId('allowedCallers'), callerControl.options, callerLabels);
+      byId('allowedCallers').value = callerControl.value || '';
+      byId('allowedCallers').disabled = false;
 
-      byId('responseInclusionNote').textContent = caps.response_inclusion
-        ? 'sent for ' + caps.web_search_type
-        : 'not sent: ' + (caps.web_search_type === 'web_search_20260318'
-            ? 'the installed llm-anthropic cannot express it'
-            : caps.web_search_type + ' has no response_inclusion');
+      const inclusion = data.controls.response_inclusion;
+      byId('responseInclusionNote').textContent = '[' + inclusion.status + '] ' + inclusion.note;
 
+      byId('dynamicFiltering').textContent = data.controls.dynamic_filtering.value;
+      byId('dynamicFilteringNote').textContent = data.controls.dynamic_filtering.note;
+
+      showContext(data.context);
       refresh();
     }
 
@@ -295,7 +329,7 @@
         return;
       }
       if (!byId('model').options.length) {
-        setOptions(byId('model'), data.models, {}, {});
+        setOptions(byId('model'), data.models.map((value) => ({value})), {});
         byId('model').value = data.model.id;
       }
       apply(data);
@@ -304,6 +338,11 @@
     ['webSearch', 'webSearchType', 'allowedCallers'].forEach(
       (id) => byId(id).addEventListener('change', refresh)
     );
+    byId('thinking').addEventListener('change', () => {
+      applyEffortState();
+      applyThinkingState();
+      refresh();
+    });
     byId('model').addEventListener('change', loadForm);
 
     byId('send').addEventListener('click', async () => {
@@ -334,15 +373,16 @@
             byId('code').textContent = event.code;
             // The truth about dynamic filtering is what went on the request.
             byId('dynamicFiltering').textContent = event.dynamic_filtering;
-            byId('dynamicFilteringNote').textContent = 'read from the request that was sent';
+            byId('dynamicFilteringNote').textContent =
+              'read from the request · effective allowed_callers: ' + event.allowed_callers;
+            showContext(event.context);
           } else if (event.type === 'text') {
-            // With streaming off there are no chunks; the reply arrives whole.
-            if (byId('stream').value === 'true') {
-              body.textContent += event.text;
-              log.scrollTop = log.scrollHeight;
-            }
+            body.textContent += event.text;
+            log.scrollTop = log.scrollHeight;
           } else if (event.type === 'done') {
             body.textContent = event.text;
+            state.fits = event.context ? event.context.fits : null;
+            showContext(event.context);
             log.scrollTop = log.scrollHeight;
           } else if (event.type === 'error') {
             body.innerHTML = '';

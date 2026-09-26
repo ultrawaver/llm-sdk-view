@@ -4,8 +4,11 @@
   "profile_role": "fallback only. Anthropic's Models API is the primary source for the model list, max_input_tokens (context window), max_tokens (output ceiling) and the thinking/effort capabilities. Everything here is used only when that API is unavailable, and is labelled as a fallback wherever it is shown.",
   "narrow_rules": [
     "Default effort per model: not exposed by the Models API, so it can only come from Anthropic's published specs.",
-    "Whether thinking can be disabled: not exposed by the Models API; taken from llm-anthropic's always_thinks.",
-    "Dynamic filtering: web_search_20260318 keeps the API default allowed_callers=code_execution_20260120, so the field is omitted rather than sent."
+    "Default thinking state per model: not exposed by the Models API; taken from llm-anthropic's always_thinks and thinks_by_default, which match Anthropic's published specs.",
+    "Whether thinking can be disabled, and how: not exposed by the Models API. Adaptive models send thinking={'type': 'disabled'}; a model whose default is not to think is turned off by omitting the field.",
+    "Effort levels rejected when thinking is disabled (xhigh, max): not exposed by the Models API; taken from Anthropic's thinking documentation.",
+    "The extended-thinking budget: llm-anthropic hard-codes DEFAULT_THINKING_TOKENS and exposes no option, so it is read from the installed plugin and shown read-only.",
+    "Dynamic filtering: web_search_20260318 keeps the API default allowed_callers=code_execution_20260120, so the field is omitted rather than sent. web_search_20250305 defaults to direct and has no dynamic filtering."
   ],
   "models": {
     "claude-fable-5-1": {

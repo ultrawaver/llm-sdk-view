@@ -153,7 +153,8 @@ def test_the_form_still_works_without_any_model_api(isolated_cache):
     assert data["models"] == list(FOUR_MODELS)
     assert data["model_data"]["source"] == "fallback"
     assert data["model_data"]["profile_version"] == "2026-09-26"
-    assert data["capabilities"]["context_window"] == 1_000_000
+    # The default model is Claude Haiku 4.5, so the fallback window is 200k.
+    assert data["capabilities"]["context_window"] == 200_000
 
 
 def test_a_fallback_is_never_labelled_as_the_api(isolated_cache):
@@ -161,6 +162,33 @@ def test_a_fallback_is_never_labelled_as_the_api(isolated_cache):
 
     assert capabilities_for.data_source.startswith("fallback-profile")
     assert "fallback" in capabilities_for.context_window_source
+
+
+def test_the_context_meter_labels_a_fallback_limit(isolated_cache):
+    """The context figure must say that its ceiling came from the profile."""
+    from llm_sdk_view.chat import context_state
+
+    data = TestClient(app).get("/api/form").json()
+
+    assert "fallback profile" in data["context"]["limit_source"]
+    assert data["context"]["limit_data_source"] == "Fallback capability data"
+    assert context_state({}, capabilities.capabilities_for("claude-sonnet-5")).limit == (
+        capabilities.capabilities_for("claude-sonnet-5").context_window
+    )
+
+
+def test_the_context_meter_labels_a_models_api_limit(isolated_cache, record, with_key):
+    from llm_sdk_view.chat import context_state
+
+    record()
+    model_api.refresh()
+    capabilities.reset_model_data()
+
+    caps = capabilities.capabilities_for("claude-sonnet-5")
+    state = context_state({}, caps)
+
+    assert "Models API" in state.limit_source
+    assert state.limit_data_source == "Provider default"
 
 
 # --- cache -------------------------------------------------------------------

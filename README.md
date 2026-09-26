@@ -21,9 +21,15 @@ Anthropic's official Python SDK.
 - The left pane sends a message into an `llm.Conversation`; replies stream back
   over `/api/chat/stream` as server-sent events.
 - The right pane renders the `anthropic` Python SDK call from
-  `model.build_kwargs()` — the dictionary `llm-anthropic` passes to
-  `client.messages.create()`. There is no second copy of the request: the
-  renderer takes that dictionary and nothing else.
+  `model.build_kwargs()` — the dictionary `llm-anthropic` hands to the SDK.
+  There is no second copy of the request: the renderer takes that dictionary
+  and nothing else. `llm-anthropic` always opens `client.messages.stream()`, so
+  that is what the pane shows; a non-streaming `messages.create()` is never
+  rendered as if it happened.
+- Every form control reports a status, so a greyed-out value says why:
+  `Editable`, `API supported · runtime fixed`, `Unsupported by selected model`,
+  `Unsupported by current tool version`, `Provider default`, or
+  `Fallback capability data`.
 - Model facts come from the [Anthropic Models
   API](https://platform.claude.com/docs/en/about-claude/models/overview) when a
   key is present (cached on disk, refreshed in the background), and from a
@@ -154,9 +160,12 @@ follow-up steps are in
 ```text
 llm_sdk_view/       Python package and LLM plugin
   app.py            Local ASGI application
+  capabilities.py   Model capability matrix, from three ranked sources
+  chat.py           The conversation path and the form schema
   cli.py            `llm sdk-view` command
-  codegen.py        Provider SDK code generation
-  models.py         Canonical turn specification
+  codegen.py        Provider SDK code generation from build_kwargs()
+  model_api.py      Optional Anthropic Models API layer with a disk cache
+  models.json       Versioned fallback capability profile
   static/index.html Minimal two-pane UI
 tests/              Focused unit tests
 docs/               Architecture, contribution and upstream notes

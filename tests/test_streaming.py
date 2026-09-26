@@ -1,13 +1,10 @@
-"""The Streaming control: what it changes, and what it cannot.
+"""The streaming transport: what it is, and why the form cannot choose it.
 
-``stream`` is a UI presentation choice, not a provider parameter. These tests
-pin down both halves of that sentence offline:
-
-- ON yields each chunk as the provider produces it; OFF yields nothing until
-  the turn is finished, then delivers the final accumulated Message.
-- The SDK code always shows the transport the installed plugin really uses, so
-  a buffered turn must never be rendered as ``messages.create()`` when the
-  plugin opens a stream.
+The Anthropic API supports streaming and non-streaming calls, but the installed
+``llm-anthropic`` opens ``messages.stream()`` for every turn: the API rejects
+non-streaming requests whose ``max_tokens`` could run past ten minutes. So the
+form shows ``stream: ON`` as a read-only fact, offers no OFF, and the right pane
+renders the call that really happens. These tests pin all three down offline.
 """
 
 import pytest
@@ -16,6 +13,7 @@ from starlette.testclient import TestClient
 from llm_sdk_view.app import app
 from llm_sdk_view.capabilities import capabilities_for, plugin_transport
 from llm_sdk_view.chat import (
+    RUNTIME_FIXED,
     STREAMING_TRANSPORT_NOTE,
     ChatOptions,
     final_message_text,
@@ -34,7 +32,7 @@ FOUR_MODELS = (
 
 @pytest.mark.parametrize("model_id", FOUR_MODELS)
 def test_every_model_reports_the_same_transport(model_id):
-    """Streaming support is not a model capability, so nothing varies."""
+    """Streaming is not a model capability, so nothing varies."""
     import llm
 
     model = llm.get_model(capabilities_for(model_id).llm_id)
@@ -42,58 +40,36 @@ def test_every_model_reports_the_same_transport(model_id):
     assert plugin_transport(model) == "stream"
 
 
-@pytest.mark.parametrize("stream", (True, False))
-def test_the_plugin_opens_a_stream_either_way(make_session, transports, stream):
-    """A buffered turn is still sent through the streaming transport."""
-    chat = make_session(stream=stream)
+@pytest.mark.parametrize("model_id", FOUR_MODELS)
+def test_the_plugin_opens_a_stream_and_never_create(model_id, make_session, transports):
+    chat = make_session(model=model_id)
     chat.run_turn("Hello")
 
     assert transports == ["stream"]
-
-
-def test_no_create_call_is_ever_made(make_session, transports, fake_provider):
-    make_session(stream=False).run_turn("Hello")
-
     assert "create" not in transports
-    assert fake_provider, "the turn still went out, just buffered"
 
 
-# --- what the control changes ------------------------------------------------
+def test_there_is_no_stream_option_to_send(make_session, fake_provider):
+    """`stream` is not a provider parameter, so it cannot appear in a request."""
+    make_session().run_turn("Hello")
+
+    assert "stream" not in fake_provider[-1]
 
 
-def test_stream_on_yields_each_chunk(make_session):
-    events = list(make_session(stream=True).stream_turn("Hello"))
+# --- what the turn produces ---------------------------------------------------
+
+
+def test_the_turn_yields_each_chunk(make_session):
+    events = list(make_session().stream_turn("Hello"))
 
     assert [e["text"] for e in events if e["type"] == "text"] == ["Hello", " world"]
     assert events[-1]["type"] == "done"
+    assert events[-1]["text"] == "Hello world"
 
 
-def test_stream_off_yields_no_chunks(make_session):
-    events = list(make_session(stream=False).stream_turn("Hello"))
-
-    assert [e for e in events if e["type"] == "text"] == []
-    assert events[-1] == {"type": "done", "text": "Hello world"}
-
-
-def test_both_modes_end_with_the_same_reply(make_session):
-    streamed = make_session(stream=True).run_turn("Hello")
-    buffered = make_session(stream=False).run_turn("Hello")
-
-    assert streamed["text"] == buffered["text"] == "Hello world"
-
-
-def test_both_modes_send_the_same_provider_parameters(make_session, fake_provider):
-    make_session(stream=True).run_turn("Hello")
-    streamed = dict(fake_provider[-1])
-    make_session(stream=False).run_turn("Hello")
-    buffered = dict(fake_provider[-1])
-
-    assert streamed == buffered, "streaming must not change the request"
-
-
-def test_the_final_message_is_what_both_modes_show(make_session):
+def test_the_final_message_is_what_the_UI_shows_and_keeps(make_session):
     """Display and persistence come from the finished Message, not fragments."""
-    chat = make_session(stream=True)
+    chat = make_session()
     result = chat.run_turn("Hello")
 
     assert result["chunks"] == ["Hello", " world"]
@@ -101,71 +77,66 @@ def test_the_final_message_is_what_both_modes_show(make_session):
     assert final_message_text(chat.conversation.responses[-1]) == "Hello world"
 
 
-def test_the_turn_is_recorded_on_the_conversation_in_both_modes(make_session):
-    for stream in (True, False):
-        chat = make_session(stream=stream)
-        chat.run_turn("First")
-        chat.run_turn("Second")
+def test_the_turn_is_recorded_on_the_conversation(make_session):
+    chat = make_session()
+    chat.run_turn("First")
+    chat.run_turn("Second")
 
-        roles = [m["role"] for m in chat.prepare("Third").kwargs["messages"]]
-        assert roles == ["user", "assistant", "user", "assistant", "user"]
+    roles = [m["role"] for m in chat.prepare("Third").kwargs["messages"]]
+    assert roles == ["user", "assistant", "user", "assistant", "user"]
 
 
 # --- what the code pane must say ---------------------------------------------
 
 
-def test_stream_on_renders_the_streaming_transport(make_session):
-    prepared = make_session(stream=True).prepare("Hello")
+@pytest.mark.parametrize("model_id", FOUR_MODELS)
+def test_the_code_renders_the_streaming_transport(model_id, make_session):
+    prepared = make_session(model=model_id).prepare("Hello")
 
     assert prepared.transport == "stream"
     assert "with client.messages.stream(" in prepared.code
     assert "stream.get_final_message()" in prepared.code
     assert "client.messages.create(" not in prepared.code
-
-
-def test_stream_off_still_renders_the_streaming_transport(make_session):
-    """No fake create(): the plugin does not call it."""
-    prepared = make_session(stream=False).prepare("Hello")
-
-    assert prepared.transport == "stream"
-    assert "with client.messages.stream(" in prepared.code
-    assert "client.messages.create(" not in prepared.code
-    # ...and the reason is stated rather than silently substituted.
-    assert "buffered" in prepared.code
     assert "ten minutes" in prepared.code
 
 
-def test_the_note_explains_that_streaming_is_not_a_provider_parameter():
-    assert "not which SDK method is used" in STREAMING_TRANSPORT_NOTE
-
-
-def test_stream_is_not_a_provider_parameter(make_session, fake_provider):
-    """Nothing about `stream` may appear in the request."""
-    make_session(stream=False).run_turn("Hello")
-
-    assert "stream" not in fake_provider[-1]
-    assert ChatOptions(stream=False).max_tokens == 16384
+def test_the_note_explains_that_streaming_is_fixed_by_the_runtime():
+    assert "fixed by the runtime" in STREAMING_TRANSPORT_NOTE
+    assert "ten minutes" in STREAMING_TRANSPORT_NOTE
 
 
 # --- the form surface ---------------------------------------------------------
 
 
-def test_the_form_reports_the_default_and_the_transport():
+def test_the_form_offers_no_stream_choice():
+    data = TestClient(app).get("/api/form").json()
+    control = data["controls"]["stream"]
+
+    assert control["status"] == RUNTIME_FIXED
+    assert control["value"] == "ON"
+    assert control["editable"] is False
+    assert control["sdk_method"] == "client.messages.stream(...)"
+    options = {option["value"]: option for option in control["options"]}
+    assert options["ON"]["disabled"] is False
+    assert options["OFF"]["disabled"] is True
+    assert "not used by llm-anthropic" in options["OFF"]["note"]
+
+
+def test_the_form_reports_the_transport():
     data = TestClient(app).get("/api/form").json()
 
-    assert data["defaults"]["stream"] is True
     assert data["transport"]["sdk_method"] == "stream"
     assert "ten minutes" in data["transport"]["streaming_note"]
 
 
-def test_a_buffered_turn_over_http(monkeypatch, fake_provider, transports):
+def test_a_turn_over_http_uses_the_streaming_transport(
+    monkeypatch, fake_provider, transports
+):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
     from llm_sdk_view.app import SESSIONS
 
     SESSIONS.clear()
-    response = TestClient(app).post(
-        "/api/chat", json={"text": "Hello", "stream": False}
-    )
+    response = TestClient(app).post("/api/chat", json={"text": "Hello"})
 
     assert response.status_code == 200
     assert response.json()["text"] == "Hello world"
@@ -181,4 +152,9 @@ def test_the_ui_shows_the_transport_rather_than_assuming_one():
     html = (Path(llm_sdk_view.__file__).parent / "static" / "index.html").read_text("utf-8")
 
     assert "client.messages.create(" not in html
-    assert "transport" in html
+    assert "controls.stream" in html
+    assert "API supported" in html
+
+
+def test_no_stream_field_survives_on_the_options():
+    assert "stream" not in set(ChatOptions.__dataclass_fields__)

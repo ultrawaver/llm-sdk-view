@@ -131,7 +131,13 @@ def make_session(monkeypatch, fake_provider):
 
 @pytest.fixture
 def session(make_session):
-    return make_session()
+    """A conversation on the adaptive-thinking model.
+
+    The form default is Claude Haiku 4.5; the conversation tests exercise the
+    richer path so that thinking, effort and response_inclusion are all present
+    in the request they inspect.
+    """
+    return make_session(model="claude-sonnet-5")
 
 
 @pytest.fixture

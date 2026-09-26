@@ -23,10 +23,14 @@ def _options_from_payload(payload: dict) -> ChatOptions:
     a bad form never falls back to a different request than the one shown.
     """
     defaults = ChatOptions()
+    thinking = payload.get("thinking", defaults.thinking)
     return ChatOptions(
         model=payload.get("model", defaults.model),
         max_tokens=int(payload.get("max_tokens", defaults.max_tokens)),
         system=str(payload.get("system", defaults.system) or ""),
+        # None means "the official default for this model"; anything else is
+        # validated against the model's real thinking capability.
+        thinking=str(thinking) if thinking is not None else None,
         effort=payload.get("effort", defaults.effort),
         web_search=bool(payload.get("web_search", defaults.web_search)),
         web_search_type=payload.get("web_search_type", defaults.web_search_type),
@@ -34,8 +38,6 @@ def _options_from_payload(payload: dict) -> ChatOptions:
         response_inclusion=payload.get("response_inclusion", defaults.response_inclusion),
         max_uses=int(payload.get("max_uses", defaults.max_uses)),
         cache_control=bool(payload.get("cache_control", defaults.cache_control)),
-        # Presentation only: whether the UI receives text as it arrives.
-        stream=bool(payload.get("stream", defaults.stream)),
     )
 
 

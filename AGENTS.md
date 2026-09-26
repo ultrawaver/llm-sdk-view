@@ -32,6 +32,11 @@ ruff check .
 - Generate SDK code from the request `model.build_kwargs()` returns, never from a second template.
 - Read model facts from the Anthropic Models API first; fall back to the versioned profile in `llm_sdk_view/models.json` only when it is unavailable, and always say which one is in use.
 - Keep model capability decisions in `llm_sdk_view/capabilities.py`, not in UI conditionals.
+- Keep `thinking` and `effort` separate: they are separate API fields, and no control may express one through the other.
+- Never offer a control the runtime cannot honour. Label it `API supported · runtime fixed`, `Unsupported by selected model` or `Unsupported by current tool version`, and refuse the value rather than sending something else.
+- Never render an SDK call that does not happen: `llm-anthropic` always opens `client.messages.stream()`, so `messages.create()` must not appear.
+- Never trim, summarise or compact the conversation. Refuse to send and tell the user to lower `max_tokens` or start a new conversation.
+- Label an estimated context figure as an estimate, and prefer the API's own `usage` once it exists.
 - Do not add agents, RAG, memory, MCP, file upload, or additional providers without a separately accepted objective.
 
 ## Current Anthropic acceptance gates

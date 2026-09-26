@@ -88,13 +88,29 @@ default configuration degrades to three of the four behaviours.
 Checked on 2026-09-26 against `llm-anthropic` main and against the
 `response_inclusion` branch installed here, by reading the installed source
 (`WebSearch.__init__`, `WebSearch.tool_spec()`, `ClaudeOptions`,
-`build_kwargs()`) and the upstream test suite:
+`build_kwargs()`) and the upstream test suite. Each of these is shown in the UI
+with the status `API supported · runtime fixed`, and none of them can be
+changed by editing this repository:
 
 | Field | What `llm-anthropic` can do | What this repository does |
 |---|---|---|
-| `allowed_callers` | Not a `WebSearch` parameter at all. Omitting the field is what leaves the API default `code_execution_20260120` in place, so dynamic filtering is on. | Shows `code_execution_20260120 (API default)`, sends nothing, and refuses `direct` instead of silently leaving filtering on. Starts sending it automatically if the plugin gains the parameter. |
-| `cache_control` TTL | No TTL option exists; `{"type": "ephemeral"}` is hard-coded. | No TTL control at all, only a read-only note. The form must not offer a setting that cannot reach the request. |
-| A non-streaming `messages.create()` call | `execute()` always opens `messages.stream()`, even when LLM asked for a buffered response: the API rejects non-streaming requests whose `max_tokens` could run past ten minutes. | `Streaming ON/OFF` is offered as a UI presentation switch only, and the right pane renders `messages.stream()` in both modes with the reason stated. |
+| `allowed_callers` | Not a `WebSearch` parameter at all. Omitting the field is what leaves the API default caller in place: `code_execution_20260120` on `web_search_20260318` (dynamic filtering on), `direct` on `web_search_20250305` (no dynamic filtering). | Shows the effective caller, sends nothing, and refuses `direct` instead of silently leaving filtering on. `direct` is listed as `API supported · not exposed by llm-anthropic`. Starts sending it automatically if the plugin gains the parameter. |
+| `cache_control` TTL | No TTL option exists; `{"type": "ephemeral"}` is hard-coded. | No TTL control at all, only the read-only `Provider default: 5m`. The form must not offer a setting that cannot reach the request. |
+| `thinking.budget_tokens` | `DEFAULT_THINKING_TOKENS` (1024) is hard-coded for models without adaptive thinking; there is no option for it. | Reads the value off the installed module and shows it read-only, marked `API supported · runtime fixed`. `max_tokens` is still validated against it, because Anthropic requires `budget_tokens < max_tokens`. |
+| A non-streaming `messages.create()` call | `execute()` always opens `messages.stream()`, even when LLM asked for a buffered response: the API rejects non-streaming requests whose `max_tokens` could run past ten minutes. | `stream` is shown as a read-only `ON`, marked `API supported · runtime fixed by llm-anthropic`. There is no OFF: a control that only changes how this page buffers text would be a lie about the SDK call. The right pane renders `client.messages.stream(...)` and says why. |
+
+### Runtime limits the form has to respect
+
+These are not missing upstream features; they are Anthropic API rules that the
+form enforces locally so a request cannot be built that the API would reject:
+
+- Thinking cannot be disabled on `claude-fable-5-1` or `claude-opus-5-5`; both
+  the API and `llm-anthropic` reject `thinking={"type": "disabled"}`.
+- Thinking disabled is not accepted at `xhigh` or `max` effort (documented for
+  Claude Opus 5; the form applies it to the same generation).
+- `budget_tokens` must be smaller than `max_tokens`.
+- `max_tokens` may not exceed the model's output ceiling.
+- `response_inclusion` only exists on `web_search_20260318`.
 
 ## Possible later contribution: LLM core
 

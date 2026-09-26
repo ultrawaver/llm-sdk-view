@@ -9,19 +9,23 @@
    when the API is unavailable. It is always labelled as a fallback.
 3. The **installed llm / llm-anthropic** - what the plugin can actually put on
    the wire: which web search tool version a model emits, whether thinking can
-   be disabled, and which tool options exist at all. Read every time.
+   be disabled, which tool options exist at all, and the thinking token budget
+   the plugin hard-codes. Read every time.
 
 Only narrow rules the Models API does not expose are hard-coded: default effort
-per model, whether thinking can be switched off, and how dynamic filtering maps
-onto ``allowed_callers``. Nothing else in this project branches on a model id:
+per model, whether thinking can be switched off, how dynamic filtering maps
+onto ``allowed_callers``, and the effort levels Anthropic documents as rejected
+when thinking is disabled. Nothing else in this project branches on a model id:
 the form, the request builder and the validation all read
 :class:`ModelCapabilities`.
 """
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
+import sys
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -33,14 +37,26 @@ from . import model_api
 
 MODELS_JSON = Path(__file__).parent / "models.json"
 
-# "default" means the field is left off the request, so the model's own
-# default effort applies. "off" means thinking is disabled outright.
-DEFAULT_EFFORT = "default"
-DISABLED_EFFORT = "off"
+# Thinking is its own control. "on" asks the plugin to think, "off" asks it
+# not to; the value the request carries is decided per model below.
+THINKING_ON = "on"
+THINKING_OFF = "off"
+THINKING_STATES = (THINKING_ON, THINKING_OFF)
 
-DEFAULT_MODEL = "claude-sonnet-5"
+# "default" means the field is left off the request, so the model's own
+# default effort applies. Effort no longer carries a "turn thinking off"
+# value: that is the thinking control's job.
+DEFAULT_EFFORT = "default"
+
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
+
+# Anthropic documents that on models where thinking can be disabled, the
+# request is rejected when thinking is disabled at these effort levels. It is
+# stated for Claude Opus 5; the same generation shares the behaviour, so the
+# form refuses the combination rather than risk a 400.
+EFFORT_LEVELS_NEEDING_THINKING = ("xhigh", "max")
 
 # How long an in-process Models API snapshot may be reused before the disk
 # cache is consulted again.
@@ -60,9 +76,14 @@ class ModelCapabilities:
     max_output_tokens: int | None
     max_output_source: str
     thinking_mode: str
+    thinking_default: str
     thinking_always_on: bool
+    thinking_editable: bool
+    thinking_off_request: str
     supports_thinking: bool
     can_disable_thinking: bool
+    budget_tokens: int | None
+    budget_tokens_editable: bool
     supports_effort: bool
     effort_levels: tuple[str, ...]
     default_effort: str | None
@@ -71,12 +92,39 @@ class ModelCapabilities:
     plugin_response_inclusion: bool
     response_inclusion: bool
     allowed_callers: bool
+    effective_allowed_callers: str | None
+    dynamic_filtering: str
     cache_ttl: bool
     data_source: str
     verified: str
 
     def effort_options(self) -> tuple[str, ...]:
-        return (DEFAULT_EFFORT, *self.effort_levels, DISABLED_EFFORT)
+        """Effort levels the form offers. There is no "off": that is thinking."""
+        return (DEFAULT_EFFORT, *self.effort_levels)
+
+    def effort_disabled_with(self, thinking: str) -> tuple[str, ...]:
+        """Effort levels that cannot be sent alongside this thinking state."""
+        if thinking != THINKING_OFF:
+            return ()
+        if not self.can_disable_thinking:
+            return self.effort_levels
+        return tuple(
+            level for level in self.effort_levels if level in EFFORT_LEVELS_NEEDING_THINKING
+        )
+
+    def thinking_uses_budget(self, thinking: str) -> bool:
+        """True when this thinking state puts a budget_tokens on the request."""
+        return (
+            thinking == THINKING_ON
+            and self.thinking_mode == "extended"
+            and self.budget_tokens is not None
+        )
+
+    def min_max_tokens(self, thinking: str) -> int:
+        """Anthropic requires budget_tokens to be smaller than max_tokens."""
+        if self.thinking_uses_budget(thinking):
+            return self.budget_tokens + 1
+        return 1
 
     def as_dict(self) -> dict:
         return {
@@ -88,18 +136,26 @@ class ModelCapabilities:
             "max_output_tokens": self.max_output_tokens,
             "max_output_source": self.max_output_source,
             "thinking_mode": self.thinking_mode,
+            "thinking_default": self.thinking_default,
             "thinking_always_on": self.thinking_always_on,
+            "thinking_editable": self.thinking_editable,
+            "thinking_off_request": self.thinking_off_request,
             "supports_thinking": self.supports_thinking,
             "can_disable_thinking": self.can_disable_thinking,
+            "budget_tokens": self.budget_tokens,
+            "budget_tokens_editable": self.budget_tokens_editable,
             "supports_effort": self.supports_effort,
             "effort_levels": list(self.effort_levels),
             "effort_options": list(self.effort_options()),
+            "effort_needs_thinking": list(EFFORT_LEVELS_NEEDING_THINKING),
             "default_effort": self.default_effort,
             "supports_web_search": self.supports_web_search,
             "web_search_type": self.web_search_type,
             "response_inclusion": self.response_inclusion,
             "plugin_response_inclusion": self.plugin_response_inclusion,
             "allowed_callers": self.allowed_callers,
+            "effective_allowed_callers": self.effective_allowed_callers,
+            "dynamic_filtering": self.dynamic_filtering,
             "cache_ttl": self.cache_ttl,
             "data_source": self.data_source,
             "verified": self.verified,
@@ -236,9 +292,8 @@ def plugin_transport(model) -> str:
 
     ``llm-anthropic`` opens ``messages.stream()`` even when LLM asked for a
     buffered response: the API rejects non-streaming requests whose
-    ``max_tokens`` could run past ten minutes. So a buffered turn is a
-    presentation choice, not a different SDK call, and the right pane must say
-    so rather than render a ``messages.create()`` that never happens.
+    ``max_tokens`` could run past ten minutes. So the form has no streaming
+    choice to make, and the right pane must render the call that happens.
     """
     source = inspect.getsource(type(model).execute)
     if ".create(" in source:
@@ -246,6 +301,22 @@ def plugin_transport(model) -> str:
     if ".stream(" in source:
         return "stream"
     return "unknown"
+
+
+def plugin_thinking_budget() -> int | None:
+    """The budget_tokens value llm-anthropic hard-codes for extended thinking.
+
+    The plugin accepts no option for it, so this is a fact about the runtime,
+    not a setting: it is read from the installed module and shown read-only.
+    """
+    module = sys.modules.get("llm_anthropic")
+    if module is None:
+        try:
+            module = importlib.import_module("llm_anthropic")
+        except ImportError:
+            return None
+    budget = getattr(module, "DEFAULT_THINKING_TOKENS", None)
+    return budget if isinstance(budget, int) else None
 
 
 def _plugin_tool_capabilities(model) -> dict:
@@ -260,7 +331,23 @@ def _plugin_tool_capabilities(model) -> dict:
         "allowed_callers": "allowed_callers" in parameters,
         # A prompt cache TTL would be a prompt option, not a tool field.
         "cache_ttl": any("ttl" in name.lower() for name in option_fields),
+        # A thinking budget would be a prompt option too.
+        "budget_tokens": any("budget" in name.lower() for name in option_fields),
     }
+
+
+def _effective_caller(web_search_type: str | None) -> tuple[str | None, str]:
+    """What the API will really do with the tool the plugin emits.
+
+    ``web_search_20260209`` and later default to the code execution caller,
+    which is what makes dynamic filtering run. Earlier versions default to
+    ``direct`` and have no dynamic filtering at all.
+    """
+    if web_search_type is None:
+        return None, "off"
+    if web_search_type == "web_search_20260318":
+        return "code_execution_20260120", "active"
+    return "direct", "not-supported"
 
 
 def capabilities_for(model_id: str) -> ModelCapabilities:
@@ -305,6 +392,22 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
 
     thinking_mode = _thinking_mode_from_api(api, entry["thinking_mode"])
     always_thinks = bool(getattr(model, "always_thinks", False))
+    supports_thinking = bool(getattr(model, "supports_thinking", False))
+    can_disable = supports_thinking and not always_thinks
+
+    # "Off" has to be expressed the way the API accepts it for this model.
+    # Adaptive models take thinking={"type": "disabled"}; a model whose
+    # default is not to think is turned off by leaving the field out, which is
+    # the documented default and cannot be rejected.
+    if not can_disable:
+        thinking_off_request = "unsupported"
+    elif thinking_mode == "adaptive":
+        thinking_off_request = "disabled"
+    else:
+        thinking_off_request = "omitted"
+
+    budget = plugin_thinking_budget() if thinking_mode == "extended" else None
+    effective_caller, dynamic_filtering = _effective_caller(web_search_type)
 
     return ModelCapabilities(
         id=model_id,
@@ -315,10 +418,15 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
         max_output_tokens=max_output,
         max_output_source=max_output_source,
         thinking_mode=thinking_mode,
+        thinking_default=THINKING_ON if always_thinks
+        or bool(getattr(model, "thinks_by_default", False)) else THINKING_OFF,
         thinking_always_on=always_thinks,
-        supports_thinking=bool(getattr(model, "supports_thinking", False)),
-        can_disable_thinking=bool(getattr(model, "supports_thinking", False))
-        and not always_thinks,
+        thinking_editable=can_disable,
+        thinking_off_request=thinking_off_request,
+        supports_thinking=supports_thinking,
+        can_disable_thinking=can_disable,
+        budget_tokens=budget,
+        budget_tokens_editable=tool_caps["budget_tokens"],
         supports_effort=supports_effort,
         effort_levels=effort_levels,
         default_effort=entry["default_effort"],
@@ -330,6 +438,8 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
         response_inclusion=tool_caps["response_inclusion"]
         and web_search_type == "web_search_20260318",
         allowed_callers=tool_caps["allowed_callers"],
+        effective_allowed_callers=effective_caller,
+        dynamic_filtering=dynamic_filtering,
         cache_ttl=tool_caps["cache_ttl"],
         data_source="models-api" if api else f"fallback-profile-{data['profile_version']}",
         verified=data["profile_version"],

@@ -16,7 +16,10 @@ def test_first_turn_reaches_the_left_pane(session):
 
     assert events[0]["type"] == "prepared"
     assert [e["text"] for e in events if e["type"] == "text"] == ["Hello", " world"]
-    assert events[-1] == {"type": "done", "text": "Hello world"}
+    assert events[-1]["type"] == "done"
+    assert events[-1]["text"] == "Hello world"
+    # The context figure comes back with the finished turn, labelled.
+    assert events[-1]["context"]["source"] in {"API usage", "estimated", "unknown"}
     # The installed plugin sends through the streaming transport, so that is
     # what the right pane has to show.
     assert "client.messages.stream(" in events[0]["code"]

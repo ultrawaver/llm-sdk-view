@@ -44,8 +44,38 @@ Model facts come from three ranked sources, resolved in
    exist.
 
 Only narrow rules the Models API does not expose are hard-coded: default effort
-per model, whether thinking can be switched off, and how dynamic filtering maps
-onto `allowed_callers`. Nothing in the UI branches on a model id.
+and default thinking state per model, whether thinking can be switched off and
+how, which effort levels Anthropic rejects when thinking is disabled, and how
+dynamic filtering maps onto `allowed_callers`. Nothing in the UI branches on a
+model id.
+
+Thinking and effort are separate controls, because they are separate API
+fields: `thinking` produces the `thinking` block, `effort` produces
+`output_config.effort`. The budget inside an extended-thinking block is a
+runtime fact, not a setting: `llm-anthropic` hard-codes it, so the form shows
+it read-only.
+
+## Control status
+
+Every form control reports one status, so a greyed-out value always says why:
+
+| Status | Meaning |
+|---|---|
+| `Editable` | the form sets it and the request carries it |
+| `API supported · runtime fixed` | the API has it, `llm-anthropic` does not expose it |
+| `Unsupported by selected model` | the API has it, this model does not |
+| `Unsupported by current tool version` | the API has it, this tool version does not |
+| `Provider default` | nothing is sent; the API decides |
+| `Fallback capability data` | the number came from the offline profile, not the Models API |
+
+## Context
+
+The context meter shows `tokens / limit`, a percentage, and the source of both
+numbers. Before a turn it is an estimate (there is no bundled tokenizer, and
+counting tokens would be a paid API call) and says so; after a turn the API's
+own `usage` replaces it. When the estimate plus the reserved output cannot fit,
+sending is refused with the two ways out — lower `max_tokens` or start a new
+conversation. Nothing compacts, summarises or silently trims the history.
 
 ## Request path
 

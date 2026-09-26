@@ -65,6 +65,45 @@
   and an `effort` control (`default`, the plugin's levels, `off`) that is
   disabled where the plugin cannot honour it.
 
+### Added on the form honesty step
+
+- Default model is `claude-haiku-4-5-20251001`; `max_tokens` still defaults to
+  `16384` and shows the selected model's output ceiling.
+- `thinking` and `effort` are now separate controls, because they are separate
+  API fields: `thinking` produces the `thinking` block, `effort` produces
+  `output_config.effort`. `effort=off` no longer exists.
+  - `claude-fable-5-1` / `claude-opus-5-5`: adaptive thinking, locked ON and
+    greyed, because both the API and `llm-anthropic` reject disabling it.
+  - `claude-sonnet-5`: ON/OFF, default ON (the official default); OFF sends
+    `thinking={"type": "disabled"}`. Effort stays usable, but `xhigh` and
+    `max` are refused while thinking is off.
+  - `claude-haiku-4-5-20251001`: ON/OFF, default OFF (the official default);
+    OFF omits the field entirely rather than sending an unverified `disabled`.
+- Thinking budget: `llm-anthropic` hard-codes `DEFAULT_THINKING_TOKENS` and
+  exposes no option, so `budget_tokens` is read off the installed plugin and
+  shown read-only as `API supported · runtime fixed`. `max_tokens` is still
+  validated against it, because Anthropic requires `budget_tokens < max_tokens`.
+- Context meter: shows `current or estimated tokens / limit`, a percentage and
+  the source of both numbers (`estimated` before a turn, `API usage` after one,
+  `unknown` when a block cannot be measured). It refuses to send when the
+  estimate plus the reserved output cannot fit, instead of trimming, and names
+  the two ways out.
+- `stream` is read-only `ON`, marked `API supported · runtime fixed by
+  llm-anthropic`. The fake "OFF" that only buffered text in the UI is gone; the
+  right pane renders `client.messages.stream(...)` because that is what runs.
+- `allowed_callers` shows the effective caller for the model's tool version
+  (`code_execution_20260120` on `web_search_20260318`, `direct` on
+  `web_search_20250305`) and lists the other official value greyed as
+  `API supported · not exposed by llm-anthropic`.
+- Haiku honestly shows `web_search_20250305`, `direct`,
+  `Dynamic filtering: Not supported` and `response_inclusion: Not available`.
+- Every control reports one status: `Editable`,
+  `API supported · runtime fixed`, `Unsupported by selected model`,
+  `Unsupported by current tool version`, `Provider default` or
+  `Fallback capability data`.
+- Prompt cache TTL is still unsupported by `llm-anthropic`; the form shows only
+  `Provider default: 5m`, with no editable control.
+
 ### Fixed after re-reviewing the previous step
 
 - Removed `/api/preview`, `AnthropicTurn` and the hand-maintained
