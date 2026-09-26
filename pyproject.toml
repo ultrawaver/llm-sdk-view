@@ -1,0 +1,60 @@
+[project]
+name = "llm-sdk-view"
+version = "0.1a0"
+description = "Chat with LLMs and view the equivalent provider SDK code"
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [
+  { name = "ultrawaver" },
+]
+license = "Apache-2.0"
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: User Interfaces",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "click",
+  "llm>=0.36",
+  "llm-anthropic>=0.29",
+  "starlette>=0.47",
+  "uvicorn>=0.35",
+]
+
+[project.urls]
+Homepage = "https://github.com/ultrawaver/llm-sdk-view"
+Documentation = "https://github.com/ultrawaver/llm-sdk-view#readme"
+Issues = "https://github.com/ultrawaver/llm-sdk-view/issues"
+CI = "https://github.com/ultrawaver/llm-sdk-view/actions"
+Changelog = "https://github.com/ultrawaver/llm-sdk-view/releases"
+
+[project.entry-points.llm]
+sdk_view = "llm_sdk_view"
+
+[project.scripts]
+llm-sdk-view = "llm_sdk_view.cli:standalone"
+
+[project.optional-dependencies]
+test = [
+  "httpx",
+  "pytest",
+  "pytest-asyncio",
+  "ruff>=0.16.0",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["llm_sdk_view*"]
+
+[tool.setuptools.package-data]
+llm_sdk_view = ["static/*.html"]

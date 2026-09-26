@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM SDK View</title>
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #10141b; color: #e8edf2; }
+    header { padding: 14px 18px; border-bottom: 1px solid #2d3540; font-weight: 700; }
+    main { display: grid; grid-template-columns: 1fr 1fr; min-height: calc(100vh - 50px); }
+    section { padding: 18px; min-width: 0; }
+    section + section { border-left: 1px solid #2d3540; background: #0b0f14; }
+    h2 { margin-top: 0; font-size: 16px; }
+    textarea, input, select, button { font: inherit; }
+    textarea { width: 100%; min-height: 180px; resize: vertical; padding: 12px; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+    label { display: grid; gap: 5px; font-size: 13px; color: #aab6c3; }
+    input, select { padding: 8px; }
+    button { padding: 10px 14px; cursor: pointer; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid #2d3540; border-radius: 8px; min-height: 280px; }
+    .notice { color: #9fb7d0; font-size: 13px; }
+    @media (max-width: 850px) { main { grid-template-columns: 1fr; } section + section { border-left: 0; border-top: 1px solid #2d3540; } }
+  </style>
+</head>
+<body>
+  <header>LLM SDK View</header>
+  <main>
+    <section>
+      <h2>Chat</h2>
+      <p class="notice">Initial scaffold: generate the equivalent SDK code without making a paid API call.</p>
+      <textarea id="prompt" placeholder="Ask a current architecture question..."></textarea>
+      <div class="controls">
+        <label>Model<input id="model" value="claude-sonnet-5"></label>
+        <label>Max output<input id="maxTokens" type="number" value="4096" min="1"></label>
+        <label>Max searches<input id="maxSearches" type="number" value="5" min="1"></label>
+        <label>Response inclusion
+          <select id="responseInclusion"><option value="excluded">excluded</option><option value="full">full</option></select>
+        </label>
+        <label><span>Prompt cache</span><select id="promptCache"><option value="true">enabled</option><option value="false">disabled</option></select></label>
+      </div>
+      <button id="preview">Update SDK code</button>
+    </section>
+    <section>
+      <h2>Anthropic Python SDK</h2>
+      <pre id="code">Enter a message and click “Update SDK code”.</pre>
+    </section>
+  </main>
+  <script>
+    const byId = (id) => document.getElementById(id);
+    byId('preview').addEventListener('click', async () => {
+      const payload = {
+        model: byId('model').value,
+        max_tokens: Number(byId('maxTokens').value),
+        max_searches: Number(byId('maxSearches').value),
+        response_inclusion: byId('responseInclusion').value,
+        prompt_cache: byId('promptCache').value === 'true',
+        web_search: true,
+        messages: [{ role: 'user', content: byId('prompt').value }]
+      };
+      const response = await fetch('/api/preview', {
+        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      byId('code').textContent = data.code || data.error || 'Unknown error';
+    });
+  </script>
+</body>
+</html>
