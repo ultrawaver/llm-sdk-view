@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 
+import llm
 import llm_anthropic
 import pytest
 
@@ -32,10 +33,22 @@ def isolated_machine(monkeypatch):
     monkeypatch.setenv("LLM_SDK_VIEW_CACHE_DIR", directory)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    # The Models API layer reads the key store, which on this machine may hold
-    # a real key. Tests must see exactly the key they install themselves, so
-    # the environment is the only source here.
+    # The Models API layer and the send path both read the key store, which on
+    # this machine may hold a real key. A test that silently found one would
+    # pass here and fail on a CI machine that has none, so the environment is
+    # the only source either of them sees.
     monkeypatch.setattr(model_api, "api_key", lambda: os.environ.get("ANTHROPIC_API_KEY"))
+    def get_key(explicit_key=None, key_alias=None, env_var=None, **kwargs):
+        """Environment only: never the developer's own key store.
+
+        ``llm-anthropic`` asks for its key by alias with no environment
+        fallback, so a test that found the key stored on this machine would
+        pass here and fail on CI. Whatever the key fixture installs is what
+        every send path sees.
+        """
+        return os.environ.get(env_var or "ANTHROPIC_API_KEY")
+
+    monkeypatch.setattr(llm, "get_key", get_key)
     capabilities_module.reset_model_data()
     try:
         yield

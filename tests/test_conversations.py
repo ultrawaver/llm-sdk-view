@@ -20,6 +20,10 @@ from llm_sdk_view.app import SESSIONS, app
 SONNET = "claude-sonnet-5"
 HAIKU = "claude-haiku-4-5-20251001"
 
+# Sending requires a key; a machine without one must say so instead of
+# quietly failing, and these tests are about storage, not about keys.
+pytestmark = pytest.mark.usefixtures("key")
+
 
 @pytest.fixture
 def client():
