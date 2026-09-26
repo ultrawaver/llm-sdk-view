@@ -131,14 +131,17 @@ three of the four target behaviours already work upstream and one does not:
 - prompt caching — already applied to the final message with `options.cache`;
 - `response_inclusion` — **not exposed**, and the only upstream change needed.
 
-The first proposed upstream contribution is therefore narrowly scoped to a
-single optional argument:
+The first upstream contribution is therefore narrowly scoped to a single
+optional argument:
 
 ```text
 WebSearch(response_inclusion="full" | "excluded")
 ```
 
-Product-specific work stays here. See
+It has been submitted as
+[`simonw/llm-anthropic` PR #95](https://github.com/simonw/llm-anthropic/pull/95)
+and this project waits for it rather than carrying a private fork. Status and
+follow-up steps are in
 [`docs/upstream-contributions.md`](docs/upstream-contributions.md).
 
 ## Repository layout
