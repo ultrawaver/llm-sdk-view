@@ -23,6 +23,9 @@ jobs:
       # Pinned to an exact commit of the contribution branch, because the
       # released llm-anthropic cannot express response_inclusion yet. Replace
       # with the plain PyPI dependency once it is merged upstream.
-      - run: pip install 'git+https://github.com/ultrawaver/llm-anthropic@1fe612526d89b1f381a6e480a3d32e05614103dd'
+      # --force-reinstall is required: the branch still reports version 0.29,
+      # so pip would otherwise treat the requirement as already satisfied.
+      - run: pip install --force-reinstall --no-deps 'git+https://github.com/ultrawaver/llm-anthropic@1fe612526d89b1f381a6e480a3d32e05614103dd'
+      - run: python -c "import inspect; from llm_anthropic import WebSearch; assert 'response_inclusion' in inspect.signature(WebSearch.__init__).parameters"
       - run: pytest
       - run: ruff check .
