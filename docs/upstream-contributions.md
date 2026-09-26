@@ -83,6 +83,18 @@ default configuration degrades to three of the four behaviours.
   `{"type": "ephemeral"}`. A TTL option is a separate, later PR.
 - This repository must not fork `WebSearch`; it waits for the upstream option.
 
+### Fields the form shows but the plugin cannot send
+
+Checked on 2026-09-26 against `llm-anthropic` main and against the
+`response_inclusion` branch installed here, by reading the installed source
+(`WebSearch.__init__`, `WebSearch.tool_spec()`, `ClaudeOptions`,
+`build_kwargs()`) and the upstream test suite:
+
+| Field | What `llm-anthropic` can do | What this repository does |
+|---|---|---|
+| `allowed_callers` | Not a `WebSearch` parameter at all. Omitting the field is what leaves the API default `code_execution_20260120` in place, so dynamic filtering is on. | Shows `code_execution_20260120 (API default)`, sends nothing, and refuses `direct` instead of silently leaving filtering on. Starts sending it automatically if the plugin gains the parameter. |
+| `cache_control` TTL | No TTL option exists; `{"type": "ephemeral"}` is hard-coded. | No TTL control at all, only a read-only note. The form must not offer a setting that cannot reach the request. |
+
 ## Possible later contribution: LLM core
 
 Only after a demonstrated need, propose provider-neutral observation hooks for:

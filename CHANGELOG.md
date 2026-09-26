@@ -25,6 +25,24 @@
   behaviours against the installed `llm-anthropic`.
 - Bumped `actions/checkout` to v7 and `actions/setup-python` to v7 in CI.
 
+### Added on the API form controls step
+
+- The chat form now drives `model`, `max_tokens`, `system`, `web_search`,
+  `web_search_type`, `allowed_callers`, `response_inclusion`, `max_uses` and
+  `cache_control`. Defaults: `claude-sonnet-5`, `16384`, empty system, search
+  on, `web_search_20260318`, `code_execution_20260120`, `excluded`, `1`, cache
+  on.
+- `GET /api/form?model=...` reports those defaults, the model's output-token
+  ceiling, the web search tool version the plugin will emit for that model, and
+  what the installed `llm-anthropic` can actually send.
+- Every form value is checked against the built request before a turn streams:
+  a value the plugin cannot honour is refused instead of silently changed.
+- Empty `system` is omitted from the request; `max_uses=0` (unlimited) is
+  omitted rather than sent as `0`; `allowed_callers=direct` is blocked because
+  the installed plugin cannot send `allowed_callers`.
+- No prompt cache TTL control: `llm-anthropic` hard-codes
+  `cache_control={"type": "ephemeral"}` and exposes no TTL option.
+
 ### Added on the conversation branch
 
 - `llm_sdk_view/chat.py`: a `ChatSession` that runs turns through

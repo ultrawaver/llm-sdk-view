@@ -18,9 +18,13 @@
     .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
     label { display: grid; gap: 5px; font-size: 13px; color: #aab6c3; }
     input, select { padding: 8px; }
+    input:disabled, select:disabled { opacity: .45; }
     button { padding: 10px 14px; cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid #2d3540; border-radius: 8px; min-height: 280px; flex: 1; margin: 0; }
-    .notice { color: #9fb7d0; font-size: 13px; }
+    .notice, .status { color: #9fb7d0; font-size: 13px; margin: 6px 0; }
+    .status b { color: #e8edf2; }
+    .blocked { color: #ffc27a; font-size: 13px; margin: 6px 0; min-height: 18px; }
     #log { flex: 1; overflow-y: auto; border: 1px solid #2d3540; border-radius: 8px; padding: 12px; min-height: 200px; }
     .msg { margin-bottom: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .msg .who { font-size: 12px; color: #7f8c99; text-transform: uppercase; letter-spacing: .04em; }
@@ -42,13 +46,44 @@
       <textarea id="prompt" placeholder="Ask a current architecture question..."></textarea>
       <div class="controls">
         <label>Model<input id="model" value="claude-sonnet-5"></label>
-        <label>Max output<input id="maxTokens" type="number" value="4096" min="1"></label>
-        <label>Max searches<input id="maxSearches" type="number" value="5" min="1"></label>
+        <label>Max output tokens
+          <input id="maxTokens" type="number" value="16384" min="1">
+          <span class="notice" id="maxTokensHint"></span>
+        </label>
+        <label>System
+          <input id="system" placeholder="omitted from the request when empty">
+        </label>
+        <label>Web search
+          <select id="webSearch"><option value="true">ON</option><option value="false">OFF</option></select>
+        </label>
+        <label>Web search type
+          <select id="webSearchType">
+            <option value="web_search_20260318">web_search_20260318</option>
+            <option value="web_search_20250305">web_search_20250305</option>
+          </select>
+        </label>
+        <label>Allowed callers
+          <select id="allowedCallers">
+            <option value="code_execution_20260120">code_execution_20260120</option>
+            <option value="direct">direct</option>
+          </select>
+        </label>
         <label>Response inclusion
           <select id="responseInclusion"><option value="excluded">excluded</option><option value="full">full</option></select>
+          <span class="notice" id="responseInclusionNote"></span>
         </label>
-        <label><span>Prompt cache</span><select id="promptCache"><option value="true">enabled</option><option value="false">disabled</option></select></label>
+        <label>Max uses
+          <input id="maxUses" type="number" value="1" min="0">
+          <span class="notice">0 = unlimited (the field is then omitted)</span>
+        </label>
+        <label>Prompt cache
+          <select id="cacheControl"><option value="true">ON</option><option value="false">OFF</option></select>
+          <span class="notice" id="ttlNote"></span>
+        </label>
       </div>
+      <p class="status">Dynamic filtering: <b id="dynamicFiltering">active</b>
+        <span id="dynamicFilteringNote"></span></p>
+      <p class="blocked" id="blockedNote"></p>
       <button id="send">Send</button>
     </section>
     <section>
@@ -59,6 +94,8 @@
   <script>
     const byId = (id) => document.getElementById(id);
     const log = byId('log');
+    const state = { sent: false, caps: null };
+    const DYNAMIC = 'code_execution_20260120';
     let streaming = false;
 
     function addMessage(role, text) {
@@ -76,17 +113,103 @@
       return {
         session_id: 'default',
         text,
-        model: byId('model').value,
+        model: byId('model').value.trim(),
         max_tokens: Number(byId('maxTokens').value),
-        max_searches: Number(byId('maxSearches').value),
+        system: byId('system').value,
+        web_search: byId('webSearch').value === 'true',
+        web_search_type: byId('webSearchType').value,
+        allowed_callers: byId('allowedCallers').value,
         response_inclusion: byId('responseInclusion').value,
-        prompt_cache: byId('promptCache').value === 'true',
-        web_search: true
+        max_uses: Number(byId('maxUses').value),
+        cache_control: byId('cacheControl').value === 'true'
       };
     }
 
+    function refresh() {
+      const on = byId('webSearch').value === 'true';
+      ['webSearchType', 'allowedCallers', 'responseInclusion', 'maxUses'].forEach(
+        (id) => { byId(id).disabled = !on; }
+      );
+      // response_inclusion is only accepted by web_search_20260318, and only
+      // when the installed llm-anthropic can send it at all.
+      const inclusionOk = state.caps ? state.caps.response_inclusion : true;
+      byId('responseInclusion').disabled =
+        !on || byId('webSearchType').value !== 'web_search_20260318' || !inclusionOk;
+
+      let text, note, blocked = false;
+      if (!on) {
+        text = 'off';
+        note = 'No web search tool is sent.';
+      } else if (byId('allowedCallers').value === 'direct') {
+        text = 'disabled';
+        blocked = !state.sent;
+        note = blocked
+          ? 'Direct search needs allowed_callers=["direct"], which the installed llm-anthropic cannot send. Sending is blocked instead of silently falling back.'
+          : 'allowed_callers=["direct"] is sent, which turns dynamic filtering off.';
+      } else {
+        text = 'active';
+        note = state.sent
+          ? 'allowed_callers=["' + DYNAMIC + '"] is sent.'
+          : 'allowed_callers is not sent, so the API default ' + DYNAMIC + ' applies.';
+      }
+      byId('dynamicFiltering').textContent = text;
+      byId('dynamicFilteringNote').textContent = note;
+      byId('blockedNote').textContent = blocked ? note : '';
+      byId('send').disabled = blocked;
+    }
+
+    function apply(data) {
+      byId('maxTokens').max = data.model.max_tokens || '';
+      byId('maxTokensHint').textContent = data.model.max_tokens
+        ? 'at most ' + data.model.max_tokens + ' for ' + data.model.id
+        : '';
+      // llm-anthropic derives the tool version from the model, so only the
+      // version this model actually emits is selectable.
+      Array.from(byId('webSearchType').options).forEach((option) => {
+        const used = option.value === data.model.web_search_type;
+        option.disabled = !used;
+        option.textContent = used ? option.value : option.value + ' (not used by ' + data.model.id + ')';
+      });
+      if (byId('webSearchType').value !== data.model.web_search_type) {
+        byId('webSearchType').value = data.model.web_search_type;
+      }
+      Array.from(byId('allowedCallers').options).forEach((option) => {
+        if (option.value === data.allowed_callers.api_default) {
+          option.textContent = option.value + ' (API default'
+            + (data.allowed_callers.sent ? '' : ', not sent') + ')';
+        } else {
+          option.textContent = option.value;
+        }
+      });
+      byId('ttlNote').textContent = data.cache_ttl.note;
+      byId('responseInclusionNote').textContent = data.capabilities.response_inclusion
+        ? 'only sent for web_search_20260318'
+        : 'the installed llm-anthropic cannot send response_inclusion, so it is omitted';
+      state.sent = data.allowed_callers.sent;
+      state.caps = data.capabilities;
+      refresh();
+    }
+
+    async function loadForm() {
+      const model = byId('model').value.trim() || 'claude-sonnet-5';
+      const response = await fetch('/api/form?model=' + encodeURIComponent(model));
+      const data = await response.json();
+      if (data.error) {
+        byId('maxTokensHint').textContent = data.error;
+        byId('blockedNote').textContent = data.error;
+        byId('send').disabled = true;
+        return;
+      }
+      apply(data);
+    }
+
+    ['webSearch', 'webSearchType', 'allowedCallers'].forEach(
+      (id) => byId(id).addEventListener('change', refresh)
+    );
+    byId('model').addEventListener('change', loadForm);
+
     byId('send').addEventListener('click', async () => {
-      if (streaming) return;
+      if (streaming || byId('send').disabled) return;
       const text = byId('prompt').value.trim();
       if (!text) return;
       streaming = true;
@@ -111,6 +234,9 @@
           const event = JSON.parse(part.slice(6));
           if (event.type === 'prepared') {
             byId('code').textContent = event.code;
+            // The truth about dynamic filtering is what went on the request.
+            byId('dynamicFiltering').textContent = event.dynamic_filtering;
+            byId('dynamicFilteringNote').textContent = 'read from the request that was sent';
           } else if (event.type === 'text') {
             body.textContent += event.text;
             log.scrollTop = log.scrollHeight;
@@ -125,6 +251,8 @@
       }
       streaming = false;
     });
+
+    loadForm();
   </script>
 </body>
 </html>
