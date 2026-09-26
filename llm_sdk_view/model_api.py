@@ -67,7 +67,11 @@ def save_cache(models: list[dict]) -> dict:
     payload = {"fetched_at": _now().isoformat(), "models": models}
     path = cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), "utf-8")
+    # Write atomically: a background refresh can land while a request is
+    # reading the cache, and a half-written file must never read as "no cache".
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload), "utf-8")
+    os.replace(temporary, path)
     return payload
 
 

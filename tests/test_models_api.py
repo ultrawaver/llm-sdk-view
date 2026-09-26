@@ -178,7 +178,7 @@ def test_a_fresh_cache_is_used_and_marked(isolated_cache, record, with_key):
     assert snapshot["provenance"]["fetched_at"]
 
 
-def test_a_stale_cache_is_served_but_flagged(isolated_cache, record, with_key):
+def test_a_stale_cache_is_served_but_flagged(isolated_cache, record, with_key, monkeypatch):
     record()
     payload = model_api.refresh()
     path = model_api.cache_path()
@@ -186,6 +186,9 @@ def test_a_stale_cache_is_served_but_flagged(isolated_cache, record, with_key):
     stale["fetched_at"] = "2020-01-01T00:00:00+00:00"
     stale["models"] = payload["models"]
     path.write_text(json.dumps(stale), "utf-8")
+    # Drop the key so no background refresh can overwrite the stale file while
+    # it is being read: the point of the test is the stale path, not the race.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     capabilities.reset_model_data()
     snapshot = model_api.snapshot()
