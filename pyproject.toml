@@ -24,6 +24,7 @@ dependencies = [
   "click",
   "llm>=0.36",
   "llm-anthropic>=0.29",
+  "sqlite-utils",
   "starlette>=0.47",
   "uvicorn>=0.35",
 ]

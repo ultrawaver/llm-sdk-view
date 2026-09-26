@@ -15,8 +15,11 @@ Four meanings, one vocabulary:
     Fallback capability data            the number came from the offline profile
 """
 
+from pathlib import Path
+
 import pytest
 
+import llm_sdk_view
 from llm_sdk_view.capabilities import (
     DEFAULT_EFFORT,
     THINKING_OFF,
@@ -291,3 +294,85 @@ def test_the_newer_models_show_dynamic_filtering_as_active():
         assert controls["web_search_type"]["value"] == "web_search_20260318"
         assert controls["allowed_callers"]["value"] == "code_execution_20260120"
         assert controls["dynamic_filtering"]["value"] == "active"
+
+
+# --- the caller is a fact, not a choice ---------------------------------------
+
+
+@pytest.mark.parametrize("model_id", FOUR_MODELS)
+def test_the_caller_is_never_offered_as_a_choice(model_id):
+    """llm-anthropic has no allowed_callers parameter at all.
+
+    The value shown is what the request will really do, so it is not
+    selectable - and a value the user cannot choose cannot block sending.
+    """
+    control = form_schema(model_id)["controls"]["allowed_callers"]
+
+    assert control["editable"] is False
+    assert control["status"] == RUNTIME_FIXED
+
+
+def test_a_runtime_fixed_caller_does_not_disable_the_ui():
+    """Haiku's effective caller is direct, and that is legal.
+
+    The page once read the shown value as a user choice and disabled Send, so
+    the default model could not send anything at all.
+    """
+    html = (Path(llm_sdk_view.__file__).parent / "static" / "index.html").read_text("utf-8")
+
+    assert "!!callerControl.editable" in html
+    assert "byId('allowedCallers').disabled = !callerControl.editable" in html
+
+
+# --- the Models API shape is read, not assumed --------------------------------
+
+
+def test_an_unsupported_thinking_type_is_not_read_as_supported(isolated_api_entry):
+    """The API sends {"name": {"supported": bool}}: presence is not support.
+
+    Reading presence made every model look adaptive, which put an unverified
+    {"type": "disabled"} on Haiku and refused Haiku thinking ON outright.
+    """
+    entry = isolated_api_entry(
+        "claude-haiku-4-5-20251001",
+        thinking={
+            "supported": True,
+            "types": {"adaptive": {"supported": False}, "enabled": {"supported": True}},
+        },
+    )
+    capabilities = capabilities_for(entry)
+
+    assert capabilities.thinking_mode == "extended"
+    assert capabilities.thinking_off_request == "omitted"
+    assert capabilities.budget_tokens is not None
+
+
+def test_adaptive_is_read_when_the_api_says_it_is_supported(isolated_api_entry):
+    entry = isolated_api_entry(
+        "claude-sonnet-5",
+        thinking={
+            "supported": True,
+            "types": {"adaptive": {"supported": True}, "enabled": {"supported": True}},
+        },
+    )
+
+    assert capabilities_for(entry).thinking_mode == "adaptive"
+
+
+def test_unsupported_effort_levels_are_not_offered(isolated_api_entry):
+    """A level the API marks unsupported must not appear in the form."""
+    entry = isolated_api_entry(
+        "claude-sonnet-5",
+        effort={
+            "supported": True,
+            "low": {"supported": True},
+            "medium": {"supported": True},
+            "high": {"supported": False},
+            "xhigh": {"supported": False},
+            "max": {"supported": False},
+        },
+    )
+    capabilities = capabilities_for(entry)
+
+    assert capabilities.effort_levels == ("low", "medium")
+    assert capabilities.supports_effort is True

@@ -20,10 +20,19 @@ Anthropic's official Python SDK.
 - `llm sdk-view` starts a local ASGI server on `127.0.0.1`.
 - The left pane sends a message into an `llm.Conversation`; replies stream back
   over `/api/chat/stream` as server-sent events.
-- The right pane renders the `anthropic` Python SDK call from
-  `model.build_kwargs()` — the dictionary `llm-anthropic` hands to the SDK.
-  There is no second copy of the request: the renderer takes that dictionary
-  and nothing else. `llm-anthropic` always opens `client.messages.stream()`, so
+- The right pane has two views of the same turn. **Request** renders the
+  `anthropic` Python SDK call from `model.build_kwargs()` — the dictionary
+  `llm-anthropic` hands to the SDK. There is no second copy of the request: the
+  renderer takes that dictionary and nothing else. **Response** shows what came
+  back, read off the Message the SDK finished with: content blocks, thinking,
+  citations, server tool blocks, stop reason, input/output/cache tokens and web
+  search requests, as formatted JSON plus a one-line usage summary. The left
+  bubble and the Response pane are projections of the same record, so they
+  cannot disagree.
+- Conversations are saved and can be reopened. Storage goes through LLM's own
+  SQLite schema (`llm.logs.LogStore`), so these conversations are not a second
+  chat database and they show up in `llm logs` unchanged. Titles come from the
+  first message; no model call is made to name a conversation. `llm-anthropic` always opens `client.messages.stream()`, so
   that is what the pane shows; a non-streaming `messages.create()` is never
   rendered as if it happened.
 - Every form control reports a status, so a greyed-out value says why:
@@ -40,8 +49,25 @@ Anthropic's official Python SDK.
   assert history, streaming, the four Anthropic behaviours, and that the code
   matches the request that was sent.
 
-Not implemented: SQLite-backed history in the UI, any provider other than
-Anthropic, and any paid or authenticated call in the test suite.
+Not implemented: any provider other than Anthropic, any paid or authenticated
+call in the test suite, hand-written conversation titles, and history
+management beyond opening a saved conversation (no search, delete or export).
+
+## Storage
+
+Every completed turn is written to LLM's own database (the one `llm logs`
+reads) through `llm.logs.LogStore`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/conversations` | saved conversations, newest first |
+| `GET /api/conversations/{id}` | one conversation, with each turn's request and response |
+
+Resuming passes llm's stored messages back in, so history keeps its original
+content blocks instead of being rebuilt from chat text. The request this app
+built and the code it rendered are not part of llm's schema, so they go in one
+sidecar table keyed by turn id — written in the same transaction, so a failed
+save leaves nothing behind and is reported as a failure rather than as success.
 
 ## Target behaviour
 

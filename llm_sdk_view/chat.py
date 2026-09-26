@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from math import ceil
 from typing import Any
 
@@ -46,6 +46,7 @@ from .capabilities import (
     resolve_model_id,
 )
 from .codegen import render_kwargs
+from .records import TurnRecord, build_response_view
 
 # Explicit, versioned tool types only. "latest" aliases are never sent.
 WEB_SEARCH_TYPES = ("web_search_20260318", "web_search_20250305")
@@ -162,9 +163,11 @@ def _build_web_search_tool(model, options: ChatOptions, capabilities: ModelCapab
     if capabilities.response_inclusion:
         kwargs["response_inclusion"] = options.response_inclusion
     # llm-anthropic has no allowed_callers parameter at all: it always emits
-    # the bare tool, and the API default caller applies. Anything else would be
-    # a second, fake request, so it is refused.
-    if options.allowed_callers != DYNAMIC_FILTERING_CALLER:
+    # the bare tool, and the API default caller applies. The only value that
+    # can honestly reach this point is the caller that will really be in
+    # effect for the selected model; anything else would be a second, fake
+    # request, so it is refused.
+    if options.allowed_callers != capabilities.effective_allowed_callers:
         raise UnsupportedOptionError(
             "the installed llm-anthropic cannot send allowed_callers, so "
             "dynamic filtering cannot be turned off from this UI"
@@ -739,7 +742,12 @@ class PreparedTurn:
 class ChatSession:
     """One browser conversation backed by an ``llm.Conversation``."""
 
-    def __init__(self, options: ChatOptions | None = None):
+    def __init__(
+        self,
+        options: ChatOptions | None = None,
+        conversation_id: str | None = None,
+        history: list[Any] | None = None,
+    ):
         self.options = options or ChatOptions()
         self.capabilities = capabilities_for(self.options.model)
         if self.options.thinking is None:
@@ -748,14 +756,85 @@ class ChatSession:
             self.options = replace(
                 self.options, web_search_type=self.capabilities.web_search_type
             )
+        # The default caller is the newer tool's API default; a model whose
+        # tool version is always called directly gets its own fact instead.
+        if (
+            self.options.allowed_callers == DYNAMIC_FILTERING_CALLER
+            and self.capabilities.effective_allowed_callers != DYNAMIC_FILTERING_CALLER
+        ):
+            self.options = replace(
+                self.options,
+                allowed_callers=self.capabilities.effective_allowed_callers,
+            )
         self.model = llm.get_model(resolve_model_id(self.options.model))
         self._check_thinking()
         self._check_effort()
         self._check_max_tokens()
         self._check_web_search()
-        self.conversation = llm.Conversation(model=self.model)
+        self.conversation = self._new_conversation(conversation_id, history)
+        self.last_response: Any = None
         self._last_kwargs: dict = {}
         self._usage: dict | None = None
+
+    def _new_conversation(
+        self, conversation_id: str | None, history: list[Any] | None
+    ) -> Any:
+        """A conversation identified by llm's own ULID.
+
+        Reusing the id means this app does not mint a second identifier space,
+        and passing the stored messages back in means a resumed conversation
+        carries the original content blocks rather than history rebuilt from
+        chat text.
+        """
+        extra: dict[str, Any] = {}
+        if conversation_id:
+            extra["id"] = conversation_id
+        if history:
+            extra["loaded_messages"] = list(history)
+        return llm.Conversation(model=self.model, **extra)
+
+    @property
+    def conversation_id(self) -> str:
+        return self.conversation.id
+
+    def update_options(self, options: ChatOptions) -> None:
+        """Apply a form change to a session that already holds history.
+
+        It goes through the same resolution and the same checks as a fresh
+        session: assigning the raw options would leave "use this model's
+        default" as ``None``, and the request builder would then read that as
+        "thinking is off" and send ``{"type": "disabled"}`` on a model that is
+        always thinking.
+        """
+        merged = replace(
+            options,
+            thinking=(
+                options.thinking
+                if options.thinking is not None
+                else self.capabilities.thinking_default
+            ),
+            web_search_type=(
+                options.web_search_type
+                if options.web_search_type is not None
+                else self.capabilities.web_search_type
+            ),
+            allowed_callers=(
+                self.capabilities.effective_allowed_callers
+                if options.allowed_callers == DYNAMIC_FILTERING_CALLER
+                and self.capabilities.effective_allowed_callers != DYNAMIC_FILTERING_CALLER
+                else options.allowed_callers
+            ),
+        )
+        previous = self.options
+        self.options = merged
+        try:
+            self._check_thinking()
+            self._check_effort()
+            self._check_max_tokens()
+            self._check_web_search()
+        except Exception:
+            self.options = previous
+            raise
 
     def _check_thinking(self) -> None:
         thinking = self.options.thinking
@@ -932,14 +1011,35 @@ class ChatSession:
             if event.type == "text":
                 yield {"type": "text", "text": event.chunk}
         self._record_usage(prepared.response)
+        # Only now does a turn exist: before the stream ends there is no
+        # complete Message, so there is nothing to look at or to store.
+        self.last_response = prepared.response
+        yield {
+            "type": "record",
+            "record": self.record(text, prepared).as_dict(),
+        }
         yield {
             "type": "done",
             "text": final_message_text(prepared.response),
             "context": self.context().as_dict(),
         }
 
+    def record(self, text: str, prepared: PreparedTurn) -> TurnRecord:
+        """The one object every other view of this turn is derived from."""
+        return TurnRecord(
+            conversation_id=self.conversation_id,
+            turn_id=getattr(prepared.response, "id", None),
+            user_input=text,
+            options=asdict(self.options),
+            request_kwargs=prepared.kwargs,
+            rendered_code=prepared.code,
+            response=build_response_view(prepared.response),
+            context=self.context().as_dict(),
+        )
+
     def run_turn(self, text: str) -> dict:
         events = list(self.stream_turn(text))
+        record = next(event["record"] for event in events if event["type"] == "record")
         return {
             "text": events[-1]["text"],
             "code": events[0]["code"],
@@ -949,4 +1049,5 @@ class ChatSession:
             "transport": events[0]["transport"],
             "context": events[-1]["context"],
             "chunks": [event["text"] for event in events if event["type"] == "text"],
+            "record": record,
         }

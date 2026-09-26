@@ -1,6 +1,7 @@
 from starlette.testclient import TestClient
 
 from llm_sdk_view.app import app
+from llm_sdk_view.chat import ChatOptions, ChatSession
 
 
 def test_health():
@@ -9,12 +10,20 @@ def test_health():
     assert response.json() == {"ok": True, "project": "llm-sdk-view"}
 
 
-def test_there_is_no_second_request_template():
-    """The removed /api/preview rendered a hand-maintained request shape.
+def test_the_preview_is_not_a_second_request_template():
+    """/api/preview must be the real request, not a second copy of it.
 
-    Its whole purpose was a second copy of the request, which could drift from
-    the one llm-anthropic builds, so it must not come back.
+    The version that was deleted rendered a hand-maintained request shape,
+    which could drift from what llm-anthropic builds. What came back instead
+    runs the same prepare() path, so the rule to prove is that a preview and a
+    real turn produce byte-identical code - not that the endpoint is gone.
     """
-    response = TestClient(app).post("/api/preview", json={"messages": []})
+    client = TestClient(app)
+    payload = {"session_id": "preview-vs-send", "text": "hi", "model": "claude-sonnet-5"}
+    preview = client.post("/api/preview", json=payload).json()
 
-    assert response.status_code == 404
+    assert preview["sent"] is False
+    assert "client.messages.stream(" in preview["code"]
+    assert preview["code"] == ChatSession(ChatOptions(model="claude-sonnet-5")).prepare(
+        "hi"
+    ).code

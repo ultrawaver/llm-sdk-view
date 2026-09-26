@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import llm
 
@@ -248,20 +249,39 @@ def resolve_model_id(model_id: str) -> str:
     return entry["llm_id"] if entry else model_id
 
 
+def _supported(value: Any) -> bool:
+    """Read one Models API capability flag.
+
+    The Models API reports every capability as ``{"supported": true/false}``,
+    not as a bare name: a key that is present can still be unsupported, so
+    presence is never enough. Older shapes (a bare bool, or a list of names)
+    are still read, because a wrong answer here decides what the form allows.
+    """
+    if isinstance(value, dict):
+        return bool(value.get("supported", False))
+    return bool(value)
+
+
 def _effort_levels_from_api(entry: dict, fallback: tuple[str, ...]) -> tuple[str, ...]:
     effort = (entry.get("capabilities") or {}).get("effort") or {}
     if not effort:
         return fallback
-    levels = tuple(level for level in EFFORT_ORDER if effort.get(level))
+    levels = tuple(level for level in EFFORT_ORDER if _supported(effort.get(level)))
     return levels or fallback
 
 
 def _thinking_mode_from_api(entry: dict, fallback: str) -> str:
     thinking = (entry.get("capabilities") or {}).get("thinking") or {}
-    types = thinking.get("types") or []
-    if "adaptive" in types:
+    raw = thinking.get("types") or {}
+    # The API sends {"adaptive": {"supported": false}, ...}; an older shape
+    # sends a plain list of names. Both are read, but only a supported type
+    # counts: presence alone would call every model adaptive.
+    types = raw if isinstance(raw, dict) else {name: True for name in raw}
+    if not types:
+        return fallback
+    if _supported(types.get("adaptive")):
         return "adaptive"
-    if "enabled" in types:
+    if _supported(types.get("enabled")):
         return "extended"
     return fallback
 

@@ -118,6 +118,44 @@ thinking models, a `thinking` block, and both appear in the rendered code
 because they are in the dictionary that was sent. Tests assert the rendered
 call evaluates back to exactly that dictionary.
 
+## One record per turn
+
+Every view of a turn is a projection of one object, `llm_sdk_view/records.py`:
+
+```text
+ChatOptions          -> what the form asked for
+build_kwargs()       -> the request that was built
+render_kwargs()      -> the code the right pane showed
+finished Message     -> the response the SDK answered with
+        |
+        v
+    TurnRecord  ->  chat bubble, Response pane, rows in SQLite
+```
+
+The Response is read off the Message the provider finished with, never
+reassembled from streamed text: thinking blocks, citations, tool results and
+usage counters only exist there. Nothing that surface shows is derived from
+the bubble, so the two cannot disagree.
+
+## History lives in llm's database
+
+`llm_sdk_view/store.py` writes through `llm.logs.LogStore` — llm's own
+read/write API for its SQLite schema and the same object its CLI builds on.
+There is no second conversation or response table, and no subprocess call to
+the CLI:
+
+- `threads` and `turns` carry the conversation id, timings, usage and provider
+  response, so `llm logs` sees these conversations unchanged;
+- conversation ids are llm's own ULIDs, reused rather than reinvented;
+- resuming passes the stored messages back in as `Conversation.loaded_messages`
+  so the original content blocks - not a transcript - become the history;
+
+One narrow sidecar table, `llm_sdk_view_turns`, holds what upstream has no
+column for: the request this app built and the code it rendered. Both writes
+happen in one transaction; if the sidecar cannot be written the turn is not
+saved and the page is told so. Provenance rides in that table's own `source`
+column instead of being smuggled into an upstream one.
+
 ## Upstream boundary
 
 - Provider behavior useful to every `llm-anthropic` user belongs upstream.

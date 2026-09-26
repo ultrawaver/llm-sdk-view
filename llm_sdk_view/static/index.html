@@ -9,9 +9,17 @@
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: #10141b; color: #e8edf2; }
     header { padding: 14px 18px; border-bottom: 1px solid #2d3540; font-weight: 700; }
-    main { display: grid; grid-template-columns: 1fr 1fr; min-height: calc(100vh - 50px); }
+    main { display: grid; grid-template-columns: 260px 1fr 1fr; min-height: calc(100vh - 50px); }
     section { padding: 18px; min-width: 0; display: flex; flex-direction: column; }
     section + section { border-left: 1px solid #2d3540; background: #0b0f14; }
+    .sidebar { gap: 10px; }
+    #conversationList { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+    .conversation { text-align: left; padding: 8px 10px; border: 1px solid #2d3540; border-radius: 6px; background: transparent; color: #e8edf2; }
+    .conversation.current { border-color: #6fa8dc; }
+    .conversation small { display: block; color: #7f8c99; font-size: 11px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+    .tabs button { padding: 6px 12px; font-size: 13px; }
+    .tabs button.current { outline: 1px solid #6fa8dc; }
     h2 { margin-top: 0; font-size: 16px; }
     textarea, input, select, button { font: inherit; }
     textarea { width: 100%; min-height: 110px; resize: vertical; padding: 12px; }
@@ -32,12 +40,20 @@
     .msg.user .who { color: #8fd0ff; }
     .msg.assistant .who { color: #9ee6b4; }
     .error { color: #ff9b9b; }
-    @media (max-width: 850px) { main { grid-template-columns: 1fr; } section + section { border-left: 0; border-top: 1px solid #2d3540; } }
+    @media (max-width: 1100px) { main { grid-template-columns: 1fr 1fr; } .sidebar { grid-column: span 2; } }
+    @media (max-width: 850px) { main { grid-template-columns: 1fr; } .sidebar { grid-column: auto; } section + section { border-left: 0; border-top: 1px solid #2d3540; } }
   </style>
 </head>
 <body>
   <header>LLM SDK View</header>
   <main>
+    <section class="sidebar">
+      <h2>Conversations</h2>
+      <button id="newConversation">+ New conversation</button>
+      <div id="conversationList"></div>
+      <p class="notice" id="historyNote">Saved in llm's own SQLite. Title from the
+        first message.</p>
+    </section>
     <section>
       <h2>Chat</h2>
       <p class="notice">Each turn goes through <code>llm.Conversation</code> and
@@ -107,14 +123,22 @@
       <button id="send">Send</button>
     </section>
     <section>
-      <h2>Anthropic Python SDK</h2>
-      <pre id="code">Send a message to see the equivalent SDK call.</pre>
+      <div class="tabs">
+        <button id="tabRequest">Request</button>
+        <button id="tabResponse">Response</button>
+      </div>
+      <p class="status" id="codeStatus">not built yet</p>
+      <p class="status" id="responseSummary"></p>
+      <pre id="code">Type a prompt to preview the exact request Send will build.</pre>
     </section>
   </main>
   <script>
     const byId = (id) => document.getElementById(id);
     const log = byId('log');
-    const state = { data: null, caps: null, blocked: false, fits: null };
+    const state = {
+      data: null, caps: null, blocked: false, fits: null,
+      conversationId: null, turns: [], tab: 'request', selected: null
+    };
     let streaming = false;
 
     function addMessage(role, text) {
@@ -132,6 +156,10 @@
       return {
         session_id: 'default',
         text,
+        // Set once the first turn has been saved, empty while this really is
+        // a new conversation: the server then issues llm's own ULID.
+        conversation_id: state.conversationId,
+        new_conversation: state.fresh === true,
         model: byId('model').value,
         max_tokens: Number(byId('maxTokens').value),
         system: byId('system').value,
@@ -185,7 +213,10 @@
       }));
       setOptions(byId('effort'), options, labels);
       byId('effort').disabled = !state.caps.supports_effort;
-      if (byId('effort').selectedOptions[0] && byId('effort').selectedOptions[0].disabled) {
+      // Replacing the options clears the selection to '' rather than picking
+      // the first one, so a level left over from the previous model could be
+      // sent for a model that has no effort parameter at all.
+      if (!byId('effort').value || byId('effort').selectedOptions[0].disabled) {
         byId('effort').value = 'default';
       }
       byId('effortNote').textContent = state.caps.supports_effort
@@ -225,6 +256,96 @@
       byId('send').disabled = state.blocked || state.fits === false;
     }
 
+    let previewTimer = null;
+
+    function schedulePreview() {
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = setTimeout(updatePreview, 200);
+    }
+
+    // The right pane is built before anything is sent: same prepare() path,
+    // same renderer, but the Response is never executed.
+    async function updatePreview() {
+      const text = byId('prompt').value.trim();
+      if (!text) {
+        state.request = null;
+        renderPane();
+        return;
+      }
+      let data;
+      try {
+        const response = await fetch('/api/preview', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify(payload(text))
+        });
+        data = await response.json();
+      } catch (ex) {
+        byId('codeStatus').textContent = 'preview unavailable';
+        return;
+      }
+      if (data.error) {
+        state.request = { error: data.error };
+        renderPane();
+        return;
+      }
+      state.request = {
+        code: data.code,
+        status: 'preview · built by model.build_kwargs() · not sent yet',
+        dynamic_filtering: data.dynamic_filtering,
+        allowed_callers: data.allowed_callers
+      };
+      byId('dynamicFiltering').textContent = data.dynamic_filtering;
+      byId('dynamicFilteringNote').textContent =
+        'read from the request · effective allowed_callers: ' + data.allowed_callers;
+      showContext(data.context);
+      renderPane();
+    }
+
+    function setTab(tab) {
+      state.tab = tab;
+      byId('tabRequest').classList.toggle('current', tab === 'request');
+      byId('tabResponse').classList.toggle('current', tab === 'response');
+      renderPane();
+    }
+
+    // One pane, two views of the same turn. The Response is never assembled
+    // from the chat text: it is the JSON the SDK Message carried.
+    function renderPane() {
+      if (state.tab === 'response') {
+        const record = state.turns[state.selected];
+        if (!record) {
+          byId('code').textContent = 'No response yet. Send a turn, or pick one in the chat.';
+          byId('codeStatus').textContent = 'response · not available';
+          byId('responseSummary').textContent = '';
+          return;
+        }
+        byId('code').textContent = JSON.stringify(record.response, null, 2);
+        byId('codeStatus').textContent =
+          'response · id ' + (record.response.response_id || 'unknown')
+          + ' · read from the finished Message';
+        byId('responseSummary').textContent =
+          'model ' + (record.response.model || 'unreported')
+          + ' · ' + record.response.summary
+          + ' · stop reason ' + (record.response.stop_reason || 'unreported');
+        return;
+      }
+      if (!state.request) {
+        byId('code').textContent = 'Type a prompt to preview the exact request Send will build.';
+        byId('codeStatus').textContent = 'not built yet';
+        byId('responseSummary').textContent = '';
+        return;
+      }
+      if (state.request.error) {
+        byId('codeStatus').textContent = 'cannot be sent';
+        byId('code').textContent = 'This combination cannot be sent:\n\n' + state.request.error;
+        byId('responseSummary').textContent = '';
+        return;
+      }
+      byId('code').textContent = state.request.code;
+      byId('codeStatus').textContent = state.request.status;
+      byId('responseSummary').textContent = '';
+    }
+
     function refresh() {
       const caps = state.caps;
       const on = byId('webSearch').value === 'true';
@@ -236,7 +357,11 @@
 
       const callerControl = state.data.controls.allowed_callers;
       const chosen = byId('allowedCallers').value;
-      const off = byId('allowedCallers').value === 'direct';
+      // Only a choice the user could actually make can be blocked. When the
+      // control is runtime-fixed the value is a fact about the request - for
+      // web_search_20250305 the effective caller really is "direct" - and the
+      // request stays legal, so Send must stay available.
+      const off = !!callerControl.editable && chosen === 'direct';
       byId('allowedCallersNote').textContent = off
         ? '[' + 'API supported · not exposed by llm-anthropic' + '] sending is blocked: '
           + 'the request would still use the API default'
@@ -306,7 +431,8 @@
       });
       setOptions(byId('allowedCallers'), callerControl.options, callerLabels);
       byId('allowedCallers').value = callerControl.value || '';
-      byId('allowedCallers').disabled = false;
+      // A control the runtime cannot honour is shown, not offered as a choice.
+      byId('allowedCallers').disabled = !callerControl.editable;
 
       const inclusion = data.controls.response_inclusion;
       byId('responseInclusionNote').textContent = '[' + inclusion.status + '] ' + inclusion.note;
@@ -316,7 +442,98 @@
 
       showContext(data.context);
       refresh();
+      schedulePreview();
     }
+
+    byId('tabRequest').addEventListener('click', () => setTab('request'));
+    byId('tabResponse').addEventListener('click', () => setTab('response'));
+    byId('prompt').addEventListener('input', () => { state.selected = null; renderPane(); });
+
+    // --- conversations -------------------------------------------------------
+    // Storage is llm's own SQLite, so anything saved here shows up in
+    // `llm logs` too, and anything saved there is reachable from this list.
+
+    async function loadConversations() {
+      const data = await (await fetch('/api/conversations')).json();
+      if (data.error) {
+        byId('historyNote').textContent = data.error;
+        return;
+      }
+      const list = byId('conversationList');
+      list.innerHTML = '';
+      data.items.forEach((item) => {
+        const button = document.createElement('button');
+        button.className = 'conversation'
+          + (item.id === state.conversationId ? ' current' : '');
+        const label = document.createTextNode(item.name);
+        const meta = document.createElement('small');
+        meta.textContent = item.turns + ' turn' + (item.turns === 1 ? '' : 's')
+          + ' · ' + (item.last_turn || '').replace('T', ' ').slice(0, 16);
+        button.appendChild(label);
+        button.appendChild(meta);
+        button.addEventListener('click', () => openConversation(item.id));
+        list.appendChild(button);
+      });
+    }
+
+    async function openConversation(id) {
+      const data = await (await fetch('/api/conversations/' + id)).json();
+      if (data.error) {
+        byId('blockedNote').textContent = data.error;
+        return;
+      }
+      log.innerHTML = '';
+      state.conversationId = id;
+      state.turns = data.turns;
+      const first = data.turns[0];
+      if (first) {
+        byId('model').value = (first.options || {}).model || byId('model').value;
+        await loadForm();
+      }
+      data.turns.forEach((record, index) => {
+        // Both panes of a stored turn come from what was recorded, never from
+        // a second reconstruction of the provider response.
+        const user = addMessage('user', record.user_input);
+        addMessage('assistant', record.response.text || '');
+        [user, log.lastChild].forEach((node) => {
+          node.addEventListener('click', () => {
+            state.selected = index;
+            setTab(index === data.turns.length - 1 ? 'request' : 'request');
+            showTurn(index);
+          });
+        });
+      });
+      state.selected = data.turns.length - 1;
+      showTurn(state.selected);
+      loadConversations();
+    }
+
+    function showTurn(index) {
+      const record = state.turns[index];
+      if (!record) return;
+      state.selected = index;
+      state.request = {
+        code: record.rendered_code,
+        status: 'request · turn ' + (index + 1) + ' of this conversation, as it was sent'
+      };
+      setTab(state.tab);
+    }
+
+    function startNewConversation() {
+      log.innerHTML = '';
+      state.conversationId = null;
+      state.turns = [];
+      state.selected = null;
+      state.request = null;
+      byId('prompt').value = '';
+      renderPane();
+      loadConversations();
+      // Told explicitly on the next send, so the server cannot mistake an
+      // empty id for the conversation this tab was using a moment ago.
+      state.fresh = true;
+    }
+
+    byId('newConversation').addEventListener('click', startNewConversation);
 
     async function loadForm() {
       const model = byId('model').value;
@@ -345,6 +562,15 @@
     });
     byId('model').addEventListener('change', loadForm);
 
+    // Any change to the form rebuilds the preview, so the right pane always
+    // answers "what would Send put on the wire" before it costs anything.
+    ['model', 'thinking', 'effort', 'webSearch', 'webSearchType', 'allowedCallers',
+     'responseInclusion', 'maxUses', 'cacheControl', 'system', 'maxTokens', 'prompt'
+    ].forEach((id) => {
+      byId(id).addEventListener('change', schedulePreview);
+      byId(id).addEventListener('input', schedulePreview);
+    });
+
     byId('send').addEventListener('click', async () => {
       if (streaming || byId('send').disabled) return;
       const text = byId('prompt').value.trim();
@@ -353,9 +579,11 @@
       addMessage('user', text);
       byId('prompt').value = '';
       const body = addMessage('assistant', '');
+      const sent = payload(text);
+      state.fresh = false;
 
       const response = await fetch('/api/chat/stream', {
-        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(payload(text))
+        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(sent)
       });
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -371,6 +599,9 @@
           const event = JSON.parse(part.slice(6));
           if (event.type === 'prepared') {
             byId('code').textContent = event.code;
+            byId('codeStatus').textContent = 'sent · the request that was executed';
+            state.request = { code: event.code, status: byId('codeStatus').textContent };
+            if (state.tab === 'request') renderPane();
             // The truth about dynamic filtering is what went on the request.
             byId('dynamicFiltering').textContent = event.dynamic_filtering;
             byId('dynamicFilteringNote').textContent =
@@ -384,6 +615,21 @@
             state.fits = event.context ? event.context.fits : null;
             showContext(event.context);
             log.scrollTop = log.scrollHeight;
+          } else if (event.type === 'record') {
+            // One record drives every view of the turn: the bubble above was
+            // already written from the same Message this came from.
+            state.turns.push(event.record);
+            state.selected = state.turns.length - 1;
+            if (event.saved) {
+              state.conversationId = event.record.conversation_id;
+              byId('blockedNote').textContent = '';
+            } else {
+              // A completed, billed turn that is not in history is a loss the
+              // page has to say out loud.
+              byId('blockedNote').textContent =
+                'turn sent but NOT saved to history: ' + (event.error || 'unknown error');
+            }
+            loadConversations();
           } else if (event.type === 'error') {
             body.innerHTML = '';
             body.className = 'error';
@@ -397,6 +643,8 @@
     });
 
     loadForm();
+    loadConversations();
+    setTab('request');
   </script>
 </body>
 </html>

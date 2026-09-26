@@ -104,6 +104,32 @@
 - Prompt cache TTL is still unsupported by `llm-anthropic`; the form shows only
   `Provider default: 5m`, with no editable control.
 
+### Added on the SDK response and persistence step
+
+- The right pane has two views of one turn: `Request` keeps rendering
+  `model.build_kwargs()`, and `Response` shows what the SDK answered with -
+  message id, resolved model, content blocks, final text, thinking, citations,
+  server tool blocks, stop reason, input/output/cache tokens and web search
+  requests - as formatted JSON plus a one-line usage summary.
+- Added `TurnRecord` (`llm_sdk_view/records.py`): one object per turn holding
+  the conversation id, turn id, user input, effective options, request kwargs,
+  rendered code, response view, context and timestamp. The chat bubble, the
+  Response pane and the stored row are all projections of it, so there is no
+  second response model. The response is read off the finished Message, never
+  reassembled from streamed text.
+- Conversations are stored in LLM's own SQLite through `llm.logs.LogStore`: the
+  same schema the `llm` CLI writes, using LLM's own ULIDs as conversation ids
+  and its stored messages as the history a resumed conversation starts from.
+  One sidecar table keeps the request and rendered code upstream has no column
+  for; both writes happen in one transaction.
+- Added `GET /api/conversations` and `GET /api/conversations/{id}`, plus a
+  conversation sidebar with `+ New conversation`. Titles come from the first
+  user message, trimmed at a word boundary; no model call is made to name a
+  conversation.
+- A turn is only recorded once its stream has finished, and a save that fails
+  is reported as a failure: the completed turn said `saved: false` with the
+  reason instead of pretending to be in history.
+
 ### Fixed after re-reviewing the previous step
 
 - Removed `/api/preview`, `AnthropicTurn` and the hand-maintained
@@ -114,6 +140,38 @@
   `build_kwargs()` result and nothing else.
 - `prepare()` now also verifies the model id, `max_tokens` and prompt caching
   against the built request, not just the tool fields.
+
+### Fixed after the first live smoke
+
+Found by running the page against a real key and a real Models API response,
+which the offline suite could not see:
+
+- The Models API reports capabilities as `{"name": {"supported": bool}}`, not
+  as a list of names. Reading presence instead of the flag made every model
+  look adaptive, so Haiku was labelled adaptive, thinking OFF sent the
+  unverified `{"type": "disabled"}`, and thinking ON was refused outright.
+  `_thinking_mode_from_api()` and `_effort_levels_from_api()` now read the
+  flag, so Haiku is `extended` again, OFF omits the field, and only effort
+  levels the API marks supported are offered.
+- The page read the shown `allowed_callers` value as a user choice and
+  disabled Send whenever it was `direct`. For `web_search_20250305` the
+  effective caller really is `direct`, so the default model could not send
+  anything. The control is now disabled when it is runtime fixed, and only a
+  value the user could actually select can block sending.
+- `/api/preview` (POST) is back, but not as the old second request model: it
+  runs the same `ChatSession.prepare()` and the same renderer, is never
+  executed, and returns the request Send would build. The right pane refreshes
+  on every form change, so the SDK call is readable before the call is paid
+  for, and an illegal combination is refused while it is still free to fix.
+  A preview never records a turn and never discards the conversation.
+- Changing a form value on a live session left "use this model's default" as
+  `None`, which the request builder read as "thinking off" and sent
+  `{"type": "disabled"}` on a model that always thinks. Form changes now go
+  through `ChatSession.update_options()`, which resolves and checks exactly
+  like a new session.
+- The test suite is now hermetic: every test starts with no key and an empty
+  Models API cache, so a developer's own key or warm cache can no longer decide
+  what the assertions see.
 
 ### Added on the conversation branch
 
