@@ -28,13 +28,22 @@ Anthropic's official Python SDK.
   citations, server tool blocks, stop reason, input/output/cache tokens and web
   search requests, as formatted JSON plus a one-line usage summary. The left
   bubble and the Response pane are projections of the same record, so they
-  cannot disagree.
+  cannot disagree: clicking the user's bubble opens the Request that went out,
+  and clicking the assistant's opens the Response that came back.
+- Each bubble shows the time of its turn in your computer's own zone, rendered
+  through the browser's locale. The stored stamp is UTC, so the page converts
+  it; a turn with no stamp shows no time rather than "now".
 - Conversations are saved and can be reopened. Storage goes through LLM's own
   SQLite schema (`llm.logs.LogStore`), so these conversations are not a second
   chat database and they show up in `llm logs` unchanged. Titles come from the
   first message; no model call is made to name a conversation. `llm-anthropic` always opens `client.messages.stream()`, so
   that is what the pane shows; a non-streaming `messages.create()` is never
   rendered as if it happened.
+- The request's settings are eight pills in the topbar — Model, Thinking,
+  Effort, Max tokens, System, Web Search, Caching, Streaming — each opening a
+  small menu that writes back into one hidden form, so what Send builds always
+  matches what the pills show. A pill the model or the runtime cannot honour
+  is dashed and grey with the reason attached, never a fake control.
 - Every form control reports a status, so a greyed-out value says why:
   `Editable`, `API supported · runtime fixed`, `Unsupported by selected model`,
   `Unsupported by current tool version`, `Provider default`, or
@@ -140,6 +149,19 @@ Or:
 pytest
 ruff check .
 ```
+
+Part of the suite drives the page in a real browser, because reading the
+source cannot see a clipped menu or a click the browser never dispatched.
+Those checks skip themselves unless the extra is installed; Playwright uses
+an installed Google Chrome, so there is usually nothing to download:
+
+```bash
+pip install -e '.[test,browser]'
+pytest -m browser          # only the real-page checks
+pytest -m "not browser"    # skip them
+```
+
+On a machine with no Chrome, `playwright install chromium` provides one.
 
 ## Relationship to LLM, llm-anthropic and Anthropic
 

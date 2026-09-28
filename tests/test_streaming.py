@@ -7,6 +7,8 @@ form shows ``stream: ON`` as a read-only fact, offers no OFF, and the right pane
 renders the call that really happens. These tests pin all three down offline.
 """
 
+import ast
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -95,9 +97,27 @@ def test_the_code_renders_the_streaming_transport(model_id, make_session):
 
     assert prepared.transport == "stream"
     assert "with client.messages.stream(" in prepared.code
-    assert "stream.get_final_message()" in prepared.code
     assert "client.messages.create(" not in prepared.code
-    assert "ten minutes" in prepared.code
+    # The reply is read off the stream, as the official Playground shows it -
+    # a lone get_final_message() would read like a one-shot fetch.
+    assert "for text in stream.text_stream:" in prepared.code
+
+
+def test_the_code_keeps_the_order_the_plugin_built_the_request_in(make_session):
+    """The key order is llm-anthropic's assembly order, not a sorting."""
+    prepared = make_session().prepare("Hello")
+    call = ast.parse(prepared.code).body[-1].items[0].context_expr
+
+    assert [keyword.arg for keyword in call.keywords] == list(prepared.kwargs)
+
+
+def test_the_code_pane_carries_no_commentary(make_session):
+    """The code pane is the request. A request carries no explanation."""
+    code = make_session().prepare("Hello").code
+
+    assert "#" not in code
+    assert "ten minutes" not in code
+    assert "llm-anthropic" not in code
 
 
 def test_the_note_explains_that_streaming_is_fixed_by_the_runtime():
@@ -144,16 +164,10 @@ def test_a_turn_over_http_uses_the_streaming_transport(
     assert transports == ["stream"]
 
 
-def test_the_ui_shows_the_transport_rather_than_assuming_one():
-    from pathlib import Path
-
-    import llm_sdk_view
-
-    html = (Path(llm_sdk_view.__file__).parent / "static" / "index.html").read_text("utf-8")
-
-    assert "client.messages.create(" not in html
-    assert "controls.stream" in html
-    assert "API supported" in html
+def test_the_ui_shows_the_transport_rather_than_assuming_one(static_page):
+    assert "client.messages.create(" not in static_page
+    assert "controls.stream" in static_page
+    assert "API supported" in static_page
 
 
 def test_no_stream_field_survives_on_the_options():

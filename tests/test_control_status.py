@@ -15,11 +15,9 @@ Four meanings, one vocabulary:
     Fallback capability data            the number came from the offline profile
 """
 
-from pathlib import Path
 
 import pytest
 
-import llm_sdk_view
 from llm_sdk_view.capabilities import (
     DEFAULT_EFFORT,
     THINKING_OFF,
@@ -312,16 +310,14 @@ def test_the_caller_is_never_offered_as_a_choice(model_id):
     assert control["status"] == RUNTIME_FIXED
 
 
-def test_a_runtime_fixed_caller_does_not_disable_the_ui():
+def test_a_runtime_fixed_caller_does_not_disable_the_ui(static_page):
     """Haiku's effective caller is direct, and that is legal.
 
     The page once read the shown value as a user choice and disabled Send, so
     the default model could not send anything at all.
     """
-    html = (Path(llm_sdk_view.__file__).parent / "static" / "index.html").read_text("utf-8")
-
-    assert "!!callerControl.editable" in html
-    assert "byId('allowedCallers').disabled = !callerControl.editable" in html
+    assert "!!callerControl.editable" in static_page
+    assert "byId('allowedCallers').disabled = !callerControl.editable" in static_page
 
 
 # --- the Models API shape is read, not assumed --------------------------------
@@ -376,3 +372,63 @@ def test_unsupported_effort_levels_are_not_offered(isolated_api_entry):
 
     assert capabilities.effort_levels == ("low", "medium")
     assert capabilities.supports_effort is True
+
+
+# --- the status is a reason, so it is hovered rather than laid out -----------
+
+
+def test_a_status_costs_a_dot_and_says_its_sentence_on_hover(static_page):
+    """Every control still says which of the meanings it has - just not in
+    the row. "runtime fixed" and "Unsupported by selected model" are reasons,
+    and inline they both pushed the layout around and had no room for the
+    sentence that explains them.
+    """
+    assert "function whyMark(status, text)" in static_page
+    assert "function setNote(id, status, text)" in static_page
+    assert "byId(id).innerHTML = whyMark(status, text);" in static_page
+    # The sentence travels with the dot; it is not looked up again.
+    assert 'data-tip="' in static_page
+
+
+def test_the_inlined_status_badge_is_gone(static_page):
+    """One vocabulary, one rendering of it: the badge that used to sit in
+    every row would be a second place to keep in step.
+    """
+    assert "function badge(status)" not in static_page
+    assert "badge badge-" not in static_page
+    assert "class=\"badge" not in static_page
+
+
+def test_the_pill_carries_the_reason_on_the_whole_pill(static_page):
+    """A fixed or unsupported pill opens nothing, so hovering anywhere on it
+    asks for the reason; the dot is only the affordance.
+    """
+    assert "pill.dataset.tip = [tag, reason].filter(Boolean).join(' · ');" in static_page
+    assert "pill.title =" not in static_page
+    assert 'class="tag' not in static_page
+
+
+def test_a_grey_pill_answers_its_click_with_the_reason(static_page):
+    """A fixed or unsupported pill opens no menu, but its click is never met
+    with silence: the pill shakes "no" and the reason sentence pops back in
+    its answered state. Hover already shows that card, so the click must
+    produce something visibly new - a bare re-show reads as a dead click.
+    """
+    assert "flash(pill);" in static_page
+    assert "showWhyTip(pill, true);" in static_page
+    assert ".pill.hit" in static_page
+    assert "pill-shake" in static_page
+    assert ".whytip.answered" in static_page
+
+
+def test_the_sentence_is_shown_in_one_fixed_card(static_page):
+    """The pills live in a horizontal scroller, which clips an absolutely
+    positioned child, so the sentence is shown in a fixed card instead.
+    """
+    assert 'id="whyTip"' in static_page
+    assert "function showWhyTip(el, answered" in static_page
+    assert "card.style.left" in static_page
+    # One delegated pair covers every dot, including ones rendered later.
+    assert "document.addEventListener('mouseover'" in static_page
+    # It is never a hover target itself, so it cannot shadow its own dot.
+    assert "pointer-events: none;" in static_page

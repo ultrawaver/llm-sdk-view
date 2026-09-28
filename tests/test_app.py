@@ -10,6 +10,15 @@ def test_health():
     assert response.json() == {"ok": True, "project": "llm-sdk-view"}
 
 
+def test_the_page_can_ask_where_the_rates_came_from():
+    """Prices are fetched at runtime, so the footer needs to be able to say so."""
+    body = TestClient(app).get("/api/rates").json()
+
+    assert body["rates_state"] in {"live", "cached", "unavailable"}
+    assert body["rates_url"].startswith("https://")
+    assert isinstance(body["models"], int)
+
+
 def test_the_preview_is_not_a_second_request_template():
     """/api/preview must be the real request, not a second copy of it.
 

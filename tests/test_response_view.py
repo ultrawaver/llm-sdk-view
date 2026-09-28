@@ -8,10 +8,13 @@ differ from the real one in exactly the ways these tests look for.
 
 from llm_sdk_view.records import (
     NAME_MAX_CHARS,
+    RAW_MESSAGE_KEYS,
+    RAW_USAGE_KEYS,
     ResponseView,
     TurnRecord,
     build_response_view,
     conversation_name,
+    format_duration,
 )
 
 SONNET = "claude-sonnet-5"
@@ -173,6 +176,52 @@ def test_a_view_missing_fields_still_loads():
     assert view.content_blocks == []
 
 
+# --- latency: measured, never invented ----------------------------------------
+
+
+def test_latency_comes_from_llms_own_measurement():
+    """llm times the call; the view carries that number untouched."""
+    class _Timed:
+        def duration_ms(self):
+            return 3400
+
+    view = build_response_view(_Timed(), ttft_ms=210)
+
+    assert view.duration_ms == 3400
+    assert view.ttft_ms == 210
+    assert view.latency_summary() == (
+        "latency 3.40 s (client-measured, includes streaming)"
+    )
+
+
+def test_an_unmeasured_response_invents_no_latency():
+    """No duration on the response means the pane says nothing about it."""
+
+    class _Untimed:
+        pass
+
+    view = build_response_view(_Untimed())
+
+    assert view.duration_ms is None
+    assert view.ttft_ms is None
+    assert view.latency_summary() is None
+
+
+def test_format_duration_matches_the_console_style():
+    assert format_duration(340) == "0.34 s"
+    assert format_duration(3954) == "3.95 s"
+    assert format_duration(None) is None
+    assert format_duration(-5) is None
+
+
+def test_the_streamed_turn_records_ttft(make_session):
+    """The first-chunk time is measured on the way through, not reconstructed."""
+    result = make_session(model=SONNET).run_turn("hello")
+    ttft = result["record"]["response"]["ttft_ms"]
+
+    assert isinstance(ttft, int) and ttft >= 0
+
+
 # --- names come from the first message, not from a model ---------------------
 
 
@@ -196,3 +245,135 @@ def test_a_name_is_the_same_every_time():
     text = "word " * 40
 
     assert conversation_name(text) == conversation_name(text)
+
+
+# --- the official Raw shape -------------------------------------------------
+
+
+def _view(message: dict | None, usage: dict) -> ResponseView:
+    return ResponseView(
+        response_id="resp_1",
+        message_id=(message or {}).get("id"),
+        model=(message or {}).get("model"),
+        content_blocks=[],
+        text="",
+        thinking=None,
+        citations=[],
+        server_tool_blocks=[],
+        stop_reason=(message or {}).get("stop_reason"),
+        usage=usage,
+        response_json=message,
+    )
+
+
+OFFICIAL_USAGE = {
+    "input_tokens": 2227,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 0,
+    },
+    "output_tokens": 18,
+    "service_tier": "standard",
+    "inference_geo": "not_available",
+}
+
+
+def test_raw_reattaches_usage_that_llm_anthropic_popped_off():
+    message = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-haiku-4-5-20251001",
+        "content": [{"type": "text", "text": "hi"}],
+        "container": None,
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "stop_details": None,
+        "diagnostics": None,
+    }
+    raw = _view(message, OFFICIAL_USAGE).raw
+
+    assert raw["usage"]["input_tokens"] == 2227
+    assert raw["usage"]["cache_creation"]["ephemeral_5m_input_tokens"] == 0
+
+
+def test_raw_has_the_official_keys_in_the_official_order():
+    """Every official key, and in the order the Playground prints them."""
+    message = {
+        "diagnostics": None,
+        "stop_details": None,
+        "stop_sequence": None,
+        "stop_reason": "end_turn",
+        "container": None,
+        "content": [{"citations": None, "text": "hi", "type": "text"}],
+        "role": "assistant",
+        "type": "message",
+        "id": "msg_1",
+        "model": "claude-haiku-4-5-20251001",
+    }
+    raw = _view(message, OFFICIAL_USAGE).raw
+
+    assert list(raw) == list(RAW_MESSAGE_KEYS)
+    assert list(raw["usage"]) == list(RAW_USAGE_KEYS)
+    # Block keys are put back too: a stored block comes out alphabetical.
+    assert list(raw["content"][0]) == ["type", "text", "citations"]
+
+
+def test_raw_leaves_out_everything_this_app_derived():
+    """text, thinking, summary and the latency figures are ours, not the API's."""
+    usage = dict(OFFICIAL_USAGE, web_search_requests=3)
+    raw = _view({"model": "m"}, usage).raw
+
+    assert "web_search_requests" not in raw["usage"]
+    for key in ("response_id", "text", "thinking", "summary", "duration_ms", "ttft_ms"):
+        assert key not in raw
+
+
+def test_raw_keeps_any_key_the_api_adds_later():
+    """The order list is presentation: an unknown key is appended, not dropped."""
+    raw = _view({"model": "m", "brand_new_field": 1}, OFFICIAL_USAGE).raw
+
+    assert raw["brand_new_field"] == 1
+
+
+def test_raw_never_invents_a_count_the_provider_did_not_report():
+    """With caching off llm-anthropic drops counters; a zero would be a guess."""
+    raw = _view({"model": "m"}, {"input_tokens": 10, "output_tokens": 2}).raw
+
+    assert "cache_read_input_tokens" not in raw["usage"]
+    assert "cache_creation" not in raw["usage"]
+    assert raw["usage"]["input_tokens"] == 10
+
+
+def test_raw_is_none_when_there_is_no_message():
+    assert _view(None, {}).raw is None
+
+
+# --- the cost estimate rides the record -----------------------------------------
+
+
+def test_the_cost_is_derived_like_raw_and_carries_its_rates_label():
+    view = _view({"model": "claude-fable-5-1"}, {
+        "input_tokens": 900,
+        "cache_read_input_tokens": 8300,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 900,
+        "web_search_requests": 1,
+        "server_tool_use": {"web_search_requests": 1},
+    })
+    data = view.as_dict()
+
+    cost = data["cost"]
+    assert cost["total"] > 0
+    assert cost["rates_source"] == "Anthropic pricing"
+    assert cost["estimated"] is True
+    # The cost is derived, not read back: it is never stored on the view.
+    assert "cost" not in view.__dict__ or view.__dict__.get("cost") is None
+
+
+def test_an_unknown_model_turn_carries_no_cost():
+    view = _view({"model": "claude-imaginary-9"}, {"input_tokens": 1, "output_tokens": 1})
+
+    assert view.as_dict()["cost"] is None

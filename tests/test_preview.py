@@ -9,7 +9,9 @@ sending it.
 import pytest
 from starlette.testclient import TestClient
 
+from llm_sdk_view import token_count
 from llm_sdk_view.app import SESSIONS, app
+from llm_sdk_view.app import _prior_usage as prior_usage
 
 SONNET = "claude-sonnet-5"
 HAIKU = "claude-haiku-4-5-20251001"
@@ -69,6 +71,38 @@ def test_a_preview_never_records_a_turn(client, fake_provider, key):
     assert "preview-tests" not in SESSIONS
 
 
+def test_a_preview_of_a_saved_conversation_carries_its_history(
+    client, fake_provider, transports, key
+):
+    """The pane must show the request Send will build, history included.
+
+    A page that has just opened a stored conversation holds no live session
+    yet. Building the preview on an empty one showed only the message being
+    typed while Send appended it to the conversation: the right pane was
+    quietly a second model of the request, and the context figure counted a
+    single message worth of tokens.
+    """
+    client.post("/api/chat", json=payload(text="first"))
+    conversation_id = client.get("/api/conversations").json()["items"][0]["id"]
+    # The page has the conversation open but has not sent anything yet.
+    SESSIONS.clear()
+
+    preview = client.post(
+        "/api/preview", json=payload(text="second", conversation_id=conversation_id)
+    ).json()
+    sent = client.post(
+        "/api/chat", json=payload(text="second", conversation_id=conversation_id)
+    ).json()
+
+    assert [message["role"] for message in preview["kwargs"]["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert preview["kwargs"] == sent["kwargs"]
+    assert preview["code"] == sent["code"]
+
+
 def test_looking_at_another_model_does_not_discard_the_history(
     client, fake_provider, transports, key
 ):
@@ -109,10 +143,121 @@ def test_an_illegal_combination_is_refused_before_anything_is_sent(
     assert transports == []
 
 
-def test_an_empty_prompt_has_nothing_to_preview(client, fake_provider):
+def test_an_empty_draft_reports_the_conversation_baseline(
+    client, fake_provider, transports, key
+):
+    """The meter counts the whole conversation, from the provider's own numbers.
+
+    Opening a stored conversation used to leave the meter at the empty-page
+    figure - one token - because only a typed draft triggered a preview and
+    an empty one was refused. The baseline preview builds the request Send
+    would start from, history included, so the figure is the conversation's
+    real weight before a word is typed.
+
+    It is the provider's own usage rather than an estimate: the stored turn
+    reported input 10 and output 3, and both are part of the next request.
+    """
+    client.post("/api/chat", json=payload(text="first message in a stored conversation"))
+    conversation_id = client.get("/api/conversations").json()["items"][0]["id"]
+    # The page has the conversation open but has not sent anything yet.
+    SESSIONS.clear()
+    sent_so_far = list(transports)
+
+    response = client.post(
+        "/api/preview", json=payload(text="", conversation_id=conversation_id)
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["baseline"] is True
+    assert data["sent"] is False
+    # The stored turn outweighs the empty-page figure by far.
+    assert data["context"]["tokens"] == 13
+    assert data["context"]["source"] == "API usage"
+    assert data["context"]["pending"] is False
+    # A baseline builds no request to show, and sends nothing either.
+    assert "code" not in data
+    assert transports == sent_so_far
+
+
+def test_an_empty_draft_without_a_conversation_is_refused(client, fake_provider):
+    """No history, no baseline.
+
+    With nothing stored, no block exists for the cache marker to ride on,
+    so the request cannot be built: the fresh page keeps the form's own
+    figure and never asks for this one.
+    """
     response = client.post("/api/preview", json=payload(text=""))
 
     assert response.status_code == 400
+
+
+# --- the context figure the preview reports -----------------------------------
+
+
+def test_the_preview_reports_the_apis_own_count(client, fake_provider, monkeypatch):
+    """The counter's answer is what the meter shows, and it is not an estimate."""
+    monkeypatch.setattr(token_count, "lookup", lambda kwargs: 2225)
+
+    data = client.post("/api/preview", json=payload()).json()
+
+    assert data["context"]["tokens"] == 2225
+    assert data["context"]["source"] == "API count"
+    assert data["context"]["pending"] is False
+
+
+def test_a_count_that_is_still_running_is_announced(client, fake_provider, monkeypatch):
+    """A fallback figure says a count is on its way, rather than passing itself
+    off as the API's number or waiting for the network."""
+    monkeypatch.setattr(token_count, "lookup", lambda kwargs: None)
+    monkeypatch.setattr(token_count, "kick", lambda kwargs: True)
+    monkeypatch.setattr(token_count, "api_key", lambda: "fake-key-for-tests")
+
+    data = client.post("/api/preview", json=payload()).json()
+
+    assert data["context"]["pending"] is True
+    assert data["context"]["source"] != "API count"
+
+
+def test_a_measured_conversation_is_not_counted_again(
+    client, fake_provider, transports, key, monkeypatch
+):
+    """The provider already answered for a conversation it has run.
+
+    Asking the counter to re-measure a request the conversation's own usage
+    already describes would spend a round trip to be told the same number.
+    """
+    client.post("/api/chat", json=payload(text="a stored turn"))
+    conversation_id = client.get("/api/conversations").json()["items"][0]["id"]
+    SESSIONS.clear()
+
+    def never(kwargs):
+        raise AssertionError("a measured conversation must not be counted again")
+
+    monkeypatch.setattr(token_count, "lookup", never)
+    data = client.post(
+        "/api/preview", json=payload(text="", conversation_id=conversation_id)
+    ).json()
+
+    assert data["context"]["source"] == "API usage"
+    assert data["context"]["pending"] is False
+
+
+def test_the_baseline_comes_from_the_turns_own_usage(client, fake_provider, key):
+    """The stored usage is normalised into the four counters context means.
+
+    llm's database holds the provider's own key names; the meter sums uncached
+    input, cache writes, cache reads and the reply it produced.
+    """
+    client.post("/api/chat", json=payload(text="a stored turn"))
+    conversation_id = client.get("/api/conversations").json()["items"][0]["id"]
+
+    usage = prior_usage(conversation_id)
+
+    # The fake provider reports 10 input and 3 output tokens.
+    assert usage["input"] == 10
+    assert usage["output"] == 3
+    assert prior_usage("no-such-conversation") is None
 
 
 def test_an_omitted_thinking_value_still_means_the_model_default(
@@ -144,22 +289,14 @@ def test_an_empty_effort_is_the_default_not_a_level(client, fake_provider):
     assert "output_config" not in data["kwargs"]
 
 
-def test_a_greyed_effort_select_never_keeps_a_stale_level():
+def test_a_greyed_effort_select_never_keeps_a_stale_level(static_page):
     """The page resets the select when its options are replaced.
 
     Browsers clear a select to '' when the selected option is removed, which
     used to leak the previous model's level into the next request.
     """
-    from pathlib import Path
-
-    import llm_sdk_view
-
-    html = (Path(llm_sdk_view.__file__).parent / "static" / "index.html").read_text(
-        "utf-8"
-    )
-
     assert "if (!byId('effort').value || byId('effort').selectedOptions[0].disabled)" in (
-        html
+        static_page
     )
 
 

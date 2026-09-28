@@ -1,13 +1,15 @@
+import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import llm
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import store
+from . import rates_page, store, token_count
 from .chat import ChatOptions, ChatSession, MissingKeyError, form_schema
 from .records import TurnRecord
 
@@ -46,6 +48,37 @@ def _options_from_payload(payload: dict) -> ChatOptions:
     )
 
 
+def _prior_usage(conversation_id: str | None) -> dict | None:
+    """The provider's own token counts for the last turn of a conversation.
+
+    A cheap and exact answer to "how full is this conversation", and the one
+    the meter should show the moment a stored conversation is opened: the API
+    already reported it, so nothing has to be estimated or fetched. Context
+    after a turn is the whole input (uncached + cache write + cache read) plus
+    the reply it produced, which becomes part of the next request.
+
+    Returns None when there is no stored turn or no counts on it, so a caller
+    falls through to the counter and then to a labelled estimate.
+    """
+    if not conversation_id:
+        return None
+    try:
+        stored = store.load_conversation(conversation_id)
+    except Exception:  # noqa: BLE001 - a baseline is not worth failing a preview
+        return None
+    turns = (stored or {}).get("turns") or []
+    if not turns:
+        return None
+    usage = getattr(turns[-1].response, "usage", None) or {}
+    counts = {
+        "input": usage.get("input_tokens"),
+        "output": usage.get("output_tokens"),
+        "cache_creation": usage.get("cache_creation_input_tokens"),
+        "cache_read": usage.get("cache_read_input_tokens"),
+    }
+    return counts if any(isinstance(value, int) for value in counts.values()) else None
+
+
 def _session(payload: dict) -> ChatSession:
     """The session this turn belongs to.
 
@@ -73,7 +106,10 @@ def _session(payload: dict) -> ChatSession:
             return existing
     history = store.thread_messages(conversation_id) if conversation_id else None
     SESSIONS[session_id] = ChatSession(
-        options, conversation_id=conversation_id, history=history
+        options,
+        conversation_id=conversation_id,
+        history=history,
+        baseline_usage=_prior_usage(conversation_id),
     )
     return SESSIONS[session_id]
 
@@ -84,14 +120,30 @@ def _preview_session(payload: dict) -> ChatSession:
     Looking at a request must not be able to destroy the conversation: a model
     change here builds on a throwaway session, while the stored session keeps
     its history until the user actually sends something.
+
+    The throwaway still carries the stored history, because the request Send
+    would build has it. Without it the pane showed only the message being
+    typed for a conversation that already had turns - a second, quieter model
+    of the request, and a context figure that counted one message.
     """
     session_id = payload.get("session_id", "default")
+    conversation_id = payload.get("conversation_id")
     options = _options_from_payload(payload)
     existing = SESSIONS.get(session_id)
     if existing is not None and existing.options.model == options.model:
         existing.update_options(options)
         return existing
-    return ChatSession(options)
+    history = None
+    if conversation_id:
+        try:
+            history = store.thread_messages(conversation_id)
+        except Exception as ex:  # noqa: BLE001 - refusing beats a wrong request
+            raise ValueError(
+                f"cannot read the conversation to preview it: {ex}"
+            ) from ex
+    return ChatSession(
+        options, history=history, baseline_usage=_prior_usage(conversation_id)
+    )
 
 
 def _keep(session: ChatSession, record: dict) -> dict:
@@ -110,8 +162,48 @@ def _keep(session: ChatSession, record: dict) -> dict:
     return {"record": record, "saved": True, "turn_id": turn_id}
 
 
+def asset_version(name: str) -> str:
+    """Fingerprint an asset so a replaced file is never served from cache.
+
+    The page is a local tool that changes several times a day, and no cache
+    header alone settles whether the browser keeps its copy: a version in the
+    URL makes a stale file unreachable instead of merely discouraged.
+    """
+    stat = (STATIC / name).stat()
+    return hashlib.sha1(f"{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:8]
+
+
 async def index(request: Request) -> HTMLResponse:
-    return HTMLResponse((STATIC / "index.html").read_text("utf-8"))
+    html = (STATIC / "index.html").read_text("utf-8")
+    for name in ("app.css", "app.js"):
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={asset_version(name)}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+async def asset(request: Request) -> Response:
+    """Serve the page's own css/js (and the vendored highlighter).
+
+    Only files under ``static/`` with a stylesheet or script suffix are
+    served; anything else is a 404, so this route cannot read outside the
+    asset directory.
+    """
+    name = request.path_params["name"]
+    media = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}.get(
+        Path(name).suffix
+    )
+    path = (STATIC / name).resolve()
+    if media is None or not path.is_file() or not path.is_relative_to(STATIC.resolve()):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return Response(
+        path.read_bytes(),
+        media_type=media,
+        headers={
+            # Revalidate, and let the version in the page's URL decide when
+            # the bytes really changed.
+            "Cache-Control": "no-cache",
+            "ETag": f'"{asset_version(name)}"',
+        },
+    )
 
 
 async def chat(request: Request) -> JSONResponse:
@@ -171,26 +263,58 @@ async def preview(request: Request) -> JSONResponse:
     provider, nothing is billed and nothing is recorded in the conversation.
     That is the whole point - the right pane has to be readable *before* the
     user pays for a call.
+
+    An empty draft is not an empty request: the stored history, the system
+    prompt and the tools all ride along no matter what is typed next. So an
+    empty ``text`` is allowed and returns only the context figure - the
+    baseline the context meter shows before a word is typed. There is no
+    request code to show for a message that does not exist yet.
+
+    The context figure is measured, not guessed, wherever that is possible: the
+    prepared request is looked up in the counter's cache, and a missing count is
+    asked for in the background (``pending``) rather than waited for. The count
+    is what sees the ~2,200 tokens Anthropic adds for the ``web_search`` tool,
+    which no character count in this process can.
     """
     payload = await request.json()
-    if not payload.get("text"):
-        return JSONResponse({"error": "text must not be empty"}, status_code=400)
+    text = payload.get("text") or ""
     try:
-        prepared = _preview_session(payload).prepare(payload["text"])
+        session = _preview_session(payload)
+        prepared = session.prepare(text)
     except (KeyError, TypeError, ValueError) as ex:
         # Refusing early is the feature: an illegal combination is caught while
         # it is still free to fix.
         return JSONResponse({"error": str(ex)}, status_code=400)
+
+    # The provider has already answered this question when the conversation's
+    # last turn reported its usage and nothing new has been typed: that usage
+    # is the conversation's own size. Counting again would spend a round trip
+    # to be told the same number.
+    already_answered = session.baseline_usage is not None and not text.strip()
+    counted = None
+    pending = False
+    if not already_answered:
+        counted = token_count.lookup(prepared.kwargs)
+        if counted is None:
+            pending = token_count.kick(prepared.kwargs)
+    context = session.measure(prepared.kwargs, text, counted=counted)
+    if pending:
+        context = replace(context, pending=True)
+    body = {
+        "sdk": "anthropic-python",
+        "context": context.as_dict(),
+        "sent": False,
+    }
+    if not text.strip():
+        return JSONResponse({**body, "baseline": True})
     return JSONResponse(
         {
-            "sdk": "anthropic-python",
+            **body,
             "code": prepared.code,
             "kwargs": prepared.kwargs,
             "dynamic_filtering": prepared.dynamic_filtering,
             "allowed_callers": prepared.allowed_callers,
             "transport": prepared.transport,
-            "context": prepared.context.as_dict(),
-            "sent": False,
         }
     )
 
@@ -229,6 +353,25 @@ async def conversation(request: Request) -> JSONResponse:
     )
 
 
+async def rename_conversation(request: Request) -> JSONResponse:
+    """Rename a conversation, in llm's own database like everything else.
+
+    The sidebar, the chat title and `llm logs` all read the threads row, so
+    one write keeps them in agreement. An unknown id is a 404 and an empty
+    name a 400: neither may come back looking like a rename that happened.
+    """
+    payload = await request.json()
+    try:
+        renamed = store.rename_conversation(
+            request.path_params["id"], payload.get("name", "")
+        )
+    except KeyError:
+        return JSONResponse({"error": "conversation not found"}, status_code=404)
+    except ValueError as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+    return JSONResponse(renamed)
+
+
 async def form(request: Request) -> JSONResponse:
     """Defaults, limits and plugin capabilities for the chat form."""
     model_id = request.query_params.get("model") or ChatOptions.model
@@ -242,18 +385,50 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "project": "llm-sdk-view"})
 
 
+async def version(request: Request) -> JSONResponse:
+    """The build the server would serve right now.
+
+    A tab keeps its js until it is reloaded, and a local tool rebuilt several
+    times a day means a tab can easily run a build the server has already
+    replaced - reporting bugs that no longer exist. The page compares this
+    answer against the build it loaded and says so on itself when they
+    differ, instead of letting a stale tab impersonate the current one.
+    """
+    return JSONResponse(
+        {"version": asset_version("app.js")},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def rates(request: Request) -> JSONResponse:
+    """Where the unit prices came from, and how many models they cover."""
+    from .pricing import rates_status
+
+    status = rates_status()
+    status["models"] = len(rates_page.snapshot()["rates"])
+    return JSONResponse(status)
+
+
 def create_app() -> Starlette:
+    # Unit prices come from the pricing page, so a start is also a refresh.
+    # It runs in the background: the first cost shown may come from the disk
+    # cache, and it says so.
+    rates_page.kick_refresh(force=True)
     return Starlette(
         debug=False,
         routes=[
             Route("/", index),
+            Route("/static/{name:path}", asset),
             Route("/api/form", form),
             Route("/api/chat", chat, methods=["POST"]),
             Route("/api/chat/stream", chat_stream, methods=["POST"]),
             Route("/api/preview", preview, methods=["POST"]),
             Route("/api/conversations", conversations),
             Route("/api/conversations/{id}", conversation),
+            Route("/api/conversations/{id}/name", rename_conversation, methods=["POST"]),
+            Route("/api/rates", rates),
             Route("/health", health),
+            Route("/api/version", version),
         ],
     )
 

@@ -4,647 +4,222 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LLM SDK View</title>
-  <style>
-    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; background: #10141b; color: #e8edf2; }
-    header { padding: 14px 18px; border-bottom: 1px solid #2d3540; font-weight: 700; }
-    main { display: grid; grid-template-columns: 260px 1fr 1fr; min-height: calc(100vh - 50px); }
-    section { padding: 18px; min-width: 0; display: flex; flex-direction: column; }
-    section + section { border-left: 1px solid #2d3540; background: #0b0f14; }
-    .sidebar { gap: 10px; }
-    #conversationList { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-    .conversation { text-align: left; padding: 8px 10px; border: 1px solid #2d3540; border-radius: 6px; background: transparent; color: #e8edf2; }
-    .conversation.current { border-color: #6fa8dc; }
-    .conversation small { display: block; color: #7f8c99; font-size: 11px; }
-    .tabs { display: flex; gap: 8px; margin-bottom: 10px; }
-    .tabs button { padding: 6px 12px; font-size: 13px; }
-    .tabs button.current { outline: 1px solid #6fa8dc; }
-    h2 { margin-top: 0; font-size: 16px; }
-    textarea, input, select, button { font: inherit; }
-    textarea { width: 100%; min-height: 110px; resize: vertical; padding: 12px; }
-    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
-    label { display: grid; gap: 5px; font-size: 13px; color: #aab6c3; }
-    input, select { padding: 8px; }
-    input:disabled, select:disabled { opacity: .45; }
-    button { padding: 10px 14px; cursor: pointer; }
-    button:disabled { cursor: not-allowed; opacity: .5; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid #2d3540; border-radius: 8px; min-height: 280px; flex: 1; margin: 0; }
-    .notice, .status { color: #9fb7d0; font-size: 13px; margin: 6px 0; }
-    .status b { color: #e8edf2; }
-    .tag { font-size: 12px; color: #ffc27a; }
-    .blocked { color: #ffc27a; font-size: 13px; margin: 6px 0; min-height: 18px; }
-    #log { flex: 1; overflow-y: auto; border: 1px solid #2d3540; border-radius: 8px; padding: 12px; min-height: 200px; }
-    .msg { margin-bottom: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .msg .who { font-size: 12px; color: #7f8c99; text-transform: uppercase; letter-spacing: .04em; }
-    .msg.user .who { color: #8fd0ff; }
-    .msg.assistant .who { color: #9ee6b4; }
-    .error { color: #ff9b9b; }
-    @media (max-width: 1100px) { main { grid-template-columns: 1fr 1fr; } .sidebar { grid-column: span 2; } }
-    @media (max-width: 850px) { main { grid-template-columns: 1fr; } .sidebar { grid-column: auto; } section + section { border-left: 0; border-top: 1px solid #2d3540; } }
-  </style>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/vendor/prism-light.css"
+        media="(prefers-color-scheme: light)">
+  <link rel="stylesheet" href="/static/vendor/prism-dark.css"
+        media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="/static/vendor/prism-line-numbers.min.css">
 </head>
 <body>
-  <header>LLM SDK View</header>
+  <!-- Shown when the server has a newer build than the js this tab is
+       running; a stale tab reporting fixed bugs is how one defect got
+       reported three times. -->
+  <button id="staleBanner" hidden></button>
+  <header>
+    <button id="sidebarToggle" class="ghost" title="Toggle conversations (⌘B)"
+            aria-label="Toggle conversation sidebar">☰</button>
+    <h1>LLM SDK View</h1>
+    <!-- The settings live in the topbar as pills; the hidden form controls
+         below stay the single source of truth every code path reads. -->
+    <div id="settingsPills" role="group" aria-label="Request settings"></div>
+  </header>
   <main>
-    <section class="sidebar">
-      <h2>Conversations</h2>
-      <button id="newConversation">+ New conversation</button>
-      <div id="conversationList"></div>
-      <p class="notice" id="historyNote">Saved in llm's own SQLite. Title from the
-        first message.</p>
-    </section>
-    <section>
-      <h2>Chat</h2>
-      <p class="notice">Each turn goes through <code>llm.Conversation</code> and
-        <code>llm-anthropic</code>. The right pane shows the request that will
-        actually be sent.</p>
-      <div id="log"></div>
-      <textarea id="prompt" placeholder="Ask a current architecture question..."></textarea>
-      <div class="controls">
-        <label>Model
-          <select id="model"></select>
-          <span class="notice" id="contextWindow"></span>
-        </label>
-        <label>Max output tokens
-          <input id="maxTokens" type="number" value="16384" min="1">
-          <span class="notice" id="maxTokensHint"></span>
-        </label>
-        <label>System
-          <input id="system" placeholder="omitted from the request when empty">
-        </label>
-        <label>Thinking
-          <select id="thinking"></select>
-          <span class="notice" id="thinkingNote"></span>
-        </label>
-        <label>Thinking budget tokens
-          <input id="budgetTokens" type="number" disabled>
-          <span class="notice" id="budgetNote"></span>
-        </label>
-        <label>Effort
-          <select id="effort"></select>
-          <span class="notice" id="effortNote"></span>
-        </label>
-        <label>Web search
-          <select id="webSearch"><option value="true">ON</option><option value="false">OFF</option></select>
-        </label>
-        <label>Web search type
-          <select id="webSearchType"></select>
-          <span class="notice" id="webSearchTypeNote"></span>
-        </label>
-        <label>Allowed callers
-          <select id="allowedCallers"></select>
-          <span class="notice" id="allowedCallersNote"></span>
-        </label>
-        <label>Response inclusion
-          <select id="responseInclusion"><option value="excluded">excluded</option><option value="full">full</option></select>
-          <span class="notice" id="responseInclusionNote"></span>
-        </label>
-        <label>Max uses
-          <input id="maxUses" type="number" value="1" min="0">
-          <span class="notice">0 = unlimited (the field is then omitted)</span>
-        </label>
-        <label>Prompt cache
-          <select id="cacheControl"><option value="true">ON</option><option value="false">OFF</option></select>
-          <span class="notice" id="ttlNote"></span>
-        </label>
-        <label>Streaming
-          <select id="stream"><option value="ON">ON</option><option value="OFF">OFF</option></select>
-          <span class="notice" id="streamNote"></span>
-        </label>
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <h2>Conversations</h2>
+        <button id="newConversation" class="ghost">+ New</button>
       </div>
-      <p class="status">Context: <b id="contextUsage">-</b>
-        <span id="contextNote"></span></p>
-      <p class="status">Model data: <b id="modelDataSource">-</b>
-        <span id="modelDataNote"></span></p>
-      <p class="status">Dynamic filtering: <b id="dynamicFiltering">-</b>
-        <span id="dynamicFilteringNote"></span></p>
-      <p class="blocked" id="blockedNote"></p>
-      <button id="send">Send</button>
+      <div id="conversationList"><p class="notice">Loading…</p></div>
+      <p class="notice" id="historyNote">Saved in llm's own SQLite. Title from
+        the first message.</p>
+      <p class="notice build" id="buildStamp" title="The build this tab loaded"></p>
+    </aside>
+
+    <section id="chatPane">
+      <!-- The conversation's own name, above the chat it belongs to. The
+           pencil renames it in llm's database, so the sidebar and
+           `llm logs` read the same string. -->
+      <div id="chatTitleBar">
+        <span id="chatTitle" class="untitled">New conversation</span>
+        <button id="renameConversation" class="ghost" hidden
+                title="Rename this conversation"
+                aria-label="Rename this conversation">✎</button>
+        <input id="chatTitleInput" hidden maxlength="200"
+               aria-label="Conversation name">
+      </div>
+      <div id="chatBody">
+        <div id="log">
+          <div id="messages"></div>
+        </div>
+
+        <!-- Value store, never shown: the topbar pills and their menus write
+             back into these controls and fire their change events, so the
+             payload, validation and preview logic has exactly one source. -->
+        <div id="paramsPanel" hidden>
+          <details class="pgroup" open>
+            <summary>Model &amp; limits <span class="gbadge" id="gbadgeModel"></span></summary>
+            <p class="pdesc">Which model answers, and the reply's token ceiling.</p>
+            <div class="controls">
+              <label>Model
+                <select id="model"></select>
+                <span class="notice" id="contextWindow"></span>
+              </label>
+              <label>Max output tokens
+                <input id="maxTokens" type="number" value="16384" min="1">
+                <span class="notice" id="maxTokensHint"></span>
+              </label>
+              <label class="wide">System
+                <input id="system" placeholder="Instructions that apply to every turn (optional)">
+              </label>
+            </div>
+          </details>
+          <details class="pgroup">
+            <summary>Thinking <span class="gbadge" id="gbadgeThinking"></span></summary>
+            <p class="pdesc">Reasoning before the answer. The budget is fixed by
+              the runtime; effort is a separate API field.</p>
+            <div class="controls">
+              <label>Thinking
+                <select id="thinking"></select>
+                <span class="notice" id="thinkingNote"></span>
+              </label>
+              <label>Thinking budget tokens
+                <input id="budgetTokens" type="number" disabled>
+                <span class="notice" id="budgetNote"></span>
+              </label>
+              <label>Effort
+                <select id="effort"></select>
+                <span class="notice" id="effortNote"></span>
+              </label>
+            </div>
+          </details>
+          <details class="pgroup">
+            <summary>Web search <span class="gbadge" id="gbadgeSearch"></span></summary>
+            <p class="pdesc">Allow Claude to search the web and cite those
+              results in its responses.</p>
+            <div class="controls">
+              <label>Web search
+                <select id="webSearch" class="visually-hidden"><option value="true">ON</option><option value="false">OFF</option></select>
+                <button type="button" class="switch" id="webSearchSwitch"
+                        role="switch" aria-checked="true" aria-label="Web search">
+                  <span class="knob"></span>
+                </button>
+              </label>
+              <label>Web search type
+                <select id="webSearchType"></select>
+                <span class="notice" id="webSearchTypeNote"></span>
+              </label>
+              <label>Allowed callers
+                <select id="allowedCallers"></select>
+                <span class="notice" id="allowedCallersNote"></span>
+              </label>
+              <label>Response inclusion
+                <select id="responseInclusion"><option value="excluded">excluded</option><option value="full">full</option></select>
+                <span class="notice" id="responseInclusionNote"></span>
+              </label>
+              <label>Max uses
+                <input id="maxUses" type="number" value="1" min="0">
+                <span class="notice">0 = unlimited (the field is then omitted)</span>
+              </label>
+            </div>
+          </details>
+          <details class="pgroup">
+            <summary>Caching <span class="gbadge" id="gbadgeCache"></span></summary>
+            <p class="pdesc">Reuse the prompt prefix across turns. The TTL is
+              the provider default; the runtime exposes no setting for it.</p>
+            <div class="controls">
+              <label>Prompt cache
+                <select id="cacheControl" class="visually-hidden"><option value="true">ON</option><option value="false">OFF</option></select>
+                <button type="button" class="switch" id="cacheControlSwitch"
+                        role="switch" aria-checked="true" aria-label="Prompt cache">
+                  <span class="knob"></span>
+                </button>
+                <span class="notice" id="ttlNote"></span>
+              </label>
+            </div>
+          </details>
+          <details class="pgroup">
+            <summary>Transport <span class="gbadge" id="gbadgeTransport"></span></summary>
+            <p class="pdesc">llm-anthropic always opens a stream; there is no
+              buffered call to choose.</p>
+            <div class="controls">
+              <label>Streaming
+                <select id="stream"><option value="ON">ON</option><option value="OFF">OFF</option></select>
+                <span class="notice" id="streamNote"></span>
+              </label>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="cache-warn" id="cacheWarn" hidden>
+          <span class="cache-warn-icon">⚡</span>
+          <span id="cacheWarnText"></span>
+        </div>
+        <textarea id="prompt" placeholder="What the user says to Claude…  (⌘Enter to send)"></textarea>
+        <div class="composer-row">
+          <div class="meter-block">
+            <div class="meter-track"><div class="meter-fill" id="contextFill"></div></div>
+            <p class="status meter-label" id="contextLabel">Context: <b id="contextUsage">-</b><span id="contextNote"></span></p>
+          </div>
+          <button id="send" class="primary">Send <span class="key-hint">⌘⏎</span></button>
+        </div>
+        <p class="blocked" id="blockedNote"></p>
+        <div class="costwrap">
+          <div class="costpop" id="costPop" hidden></div>
+          <div class="costbar" id="costBar">
+            <span class="cost-chip" id="costTotal">–</span>
+            <span class="cost-tokens" id="costTokens">send a turn to see what it cost</span>
+            <span class="cost-hit" id="costHit"></span>
+            <span class="cost-ttl" id="cacheState"></span>
+            <span class="cost-spacer"></span>
+            <button id="costToggle" class="cost-toggle" aria-expanded="false"
+                    disabled title="Cost breakdown for the selected turn">
+              details <span class="cost-chev">▴</span>
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
-    <section>
-      <div class="tabs">
-        <button id="tabRequest">Request</button>
-        <button id="tabResponse">Response</button>
+
+    <section id="inspector">
+      <div class="inspector-bar">
+        <div class="tabs" role="tablist">
+          <button id="tabRequest" role="tab">Request</button>
+          <button id="tabResponse" role="tab">Response</button>
+        </div>
+        <span class="tabs-spacer"></span>
+        <span class="lang-chip" id="codeLang">Python</span>
+        <button id="copyCode" class="ghost" title="Copy the pane contents">⧉ Copy</button>
       </div>
       <p class="status" id="codeStatus">not built yet</p>
       <p class="status" id="responseSummary"></p>
-      <pre id="code">Type a prompt to preview the exact request Send will build.</pre>
+      <div id="inspectorEmpty">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+          <rect x="2.5" y="4" width="19" height="16" rx="2.5"/>
+          <path d="M6.5 9.5 9.5 12l-3 2.5M12 15h5"/>
+        </svg>
+        <p class="empty-title" id="emptyTitle">Type a prompt</p>
+        <p class="empty-sub" id="emptySub">The exact request Send will build
+          appears here.</p>
+      </div>
+      <pre id="code" class="line-numbers"><code id="codeContent" class="language-python"></code></pre>
     </section>
   </main>
-  <script>
-    const byId = (id) => document.getElementById(id);
-    const log = byId('log');
-    const state = {
-      data: null, caps: null, blocked: false, fits: null,
-      conversationId: null, turns: [], tab: 'request', selected: null
-    };
-    let streaming = false;
-
-    function addMessage(role, text) {
-      const div = document.createElement('div');
-      div.className = 'msg ' + role;
-      div.innerHTML = '<div class="who"></div><div class="body"></div>';
-      div.querySelector('.who').textContent = role;
-      div.querySelector('.body').textContent = text;
-      log.appendChild(div);
-      log.scrollTop = log.scrollHeight;
-      return div.querySelector('.body');
-    }
-
-    function payload(text) {
-      return {
-        session_id: 'default',
-        text,
-        // Set once the first turn has been saved, empty while this really is
-        // a new conversation: the server then issues llm's own ULID.
-        conversation_id: state.conversationId,
-        new_conversation: state.fresh === true,
-        model: byId('model').value,
-        max_tokens: Number(byId('maxTokens').value),
-        system: byId('system').value,
-        thinking: byId('thinking').value,
-        effort: byId('effort').value,
-        web_search: byId('webSearch').value === 'true',
-        web_search_type: byId('webSearchType').value,
-        allowed_callers: byId('allowedCallers').value,
-        response_inclusion: byId('responseInclusion').value,
-        max_uses: Number(byId('maxUses').value),
-        cache_control: byId('cacheControl').value === 'true'
-      };
-    }
-
-    function setOptions(select, options, labels) {
-      select.innerHTML = '';
-      options.forEach((option) => {
-        const el = document.createElement('option');
-        el.value = option.value;
-        el.textContent = labels[option.value] || option.value;
-        el.disabled = !!option.disabled;
-        select.appendChild(el);
-      });
-    }
-
-    const fmt = (n) => (n === null || n === undefined) ? 'unknown' : n.toLocaleString('en-US');
-
-    function effortLabels() {
-      const control = state.data.controls.effort;
-      const off = byId('thinking').value === 'off';
-      const labels = {};
-      control.options.forEach((option) => {
-        const blocked = off && option.blocked_without_thinking;
-        labels[option.value] = option.value === 'default'
-          ? (state.caps.default_effort
-              ? 'default (model default: ' + state.caps.default_effort + ')'
-              : 'default')
-          : option.value + (blocked ? ' (rejected with thinking off)' : '');
-      });
-      return labels;
-    }
-
-    function applyEffortState() {
-      const control = state.data.controls.effort;
-      const off = byId('thinking').value === 'off';
-      const labels = effortLabels();
-      const options = control.options.map((option) => ({
-        value: option.value,
-        // A level Anthropic rejects with thinking off is not selectable.
-        disabled: !state.caps.supports_effort || (off && option.blocked_without_thinking)
-      }));
-      setOptions(byId('effort'), options, labels);
-      byId('effort').disabled = !state.caps.supports_effort;
-      // Replacing the options clears the selection to '' rather than picking
-      // the first one, so a level left over from the previous model could be
-      // sent for a model that has no effort parameter at all.
-      if (!byId('effort').value || byId('effort').selectedOptions[0].disabled) {
-        byId('effort').value = 'default';
-      }
-      byId('effortNote').textContent = state.caps.supports_effort
-        ? '[' + control.status + '] sent as output_config.effort'
-        : '[' + control.status + '] ' + control.note;
-    }
-
-    function applyThinkingState() {
-      const thinking = state.data.controls.thinking;
-      const budget = state.data.controls.budget_tokens;
-      const on = byId('thinking').value === 'on';
-
-      byId('budgetTokens').value = budget.value === null ? '' : budget.value;
-      byId('budgetTokens').disabled = true;
-      byId('budgetNote').textContent = (budget.value === null || !on)
-        ? '[' + budget.status + '] ' + budget.note
-        : '[' + budget.status + '] sent as thinking.budget_tokens; ' + budget.note;
-
-      const control = state.data.controls.max_tokens;
-      byId('maxTokens').min = control.min_by_thinking[byId('thinking').value] || 1;
-      byId('maxTokensHint').textContent = '[' + control.status + '] ' + control.note
-        + (on && budget.value !== null
-            ? '; must stay above the ' + budget.value + ' token thinking budget'
-            : '');
-    }
-
-    function showContext(context) {
-      if (!context) return;
-      const percent = context.percent === null ? '' : ' (' + context.percent + '%)';
-      byId('contextUsage').textContent =
-        fmt(context.tokens) + ' / ' + fmt(context.limit) + ' tokens' + percent;
-      byId('contextNote').textContent =
-        'source: ' + context.source + ' · limit source: ' + context.limit_source
-        + ' · ' + fmt(context.reserved) + ' reserved for the reply'
-        + (context.fits === false ? ' · does not fit: lower max_tokens or start a new conversation' : '');
-      if (context.fits !== undefined) state.fits = context.fits;
-      byId('send').disabled = state.blocked || state.fits === false;
-    }
-
-    let previewTimer = null;
-
-    function schedulePreview() {
-      if (previewTimer) clearTimeout(previewTimer);
-      previewTimer = setTimeout(updatePreview, 200);
-    }
-
-    // The right pane is built before anything is sent: same prepare() path,
-    // same renderer, but the Response is never executed.
-    async function updatePreview() {
-      const text = byId('prompt').value.trim();
-      if (!text) {
-        state.request = null;
-        renderPane();
-        return;
-      }
-      let data;
-      try {
-        const response = await fetch('/api/preview', {
-          method: 'POST', headers: {'content-type': 'application/json'},
-          body: JSON.stringify(payload(text))
-        });
-        data = await response.json();
-      } catch (ex) {
-        byId('codeStatus').textContent = 'preview unavailable';
-        return;
-      }
-      if (data.error) {
-        state.request = { error: data.error };
-        renderPane();
-        return;
-      }
-      state.request = {
-        code: data.code,
-        status: 'preview · built by model.build_kwargs() · not sent yet',
-        dynamic_filtering: data.dynamic_filtering,
-        allowed_callers: data.allowed_callers
-      };
-      byId('dynamicFiltering').textContent = data.dynamic_filtering;
-      byId('dynamicFilteringNote').textContent =
-        'read from the request · effective allowed_callers: ' + data.allowed_callers;
-      showContext(data.context);
-      renderPane();
-    }
-
-    function setTab(tab) {
-      state.tab = tab;
-      byId('tabRequest').classList.toggle('current', tab === 'request');
-      byId('tabResponse').classList.toggle('current', tab === 'response');
-      renderPane();
-    }
-
-    // One pane, two views of the same turn. The Response is never assembled
-    // from the chat text: it is the JSON the SDK Message carried.
-    function renderPane() {
-      if (state.tab === 'response') {
-        const record = state.turns[state.selected];
-        if (!record) {
-          byId('code').textContent = 'No response yet. Send a turn, or pick one in the chat.';
-          byId('codeStatus').textContent = 'response · not available';
-          byId('responseSummary').textContent = '';
-          return;
-        }
-        byId('code').textContent = JSON.stringify(record.response, null, 2);
-        byId('codeStatus').textContent =
-          'response · id ' + (record.response.response_id || 'unknown')
-          + ' · read from the finished Message';
-        byId('responseSummary').textContent =
-          'model ' + (record.response.model || 'unreported')
-          + ' · ' + record.response.summary
-          + ' · stop reason ' + (record.response.stop_reason || 'unreported');
-        return;
-      }
-      if (!state.request) {
-        byId('code').textContent = 'Type a prompt to preview the exact request Send will build.';
-        byId('codeStatus').textContent = 'not built yet';
-        byId('responseSummary').textContent = '';
-        return;
-      }
-      if (state.request.error) {
-        byId('codeStatus').textContent = 'cannot be sent';
-        byId('code').textContent = 'This combination cannot be sent:\n\n' + state.request.error;
-        byId('responseSummary').textContent = '';
-        return;
-      }
-      byId('code').textContent = state.request.code;
-      byId('codeStatus').textContent = state.request.status;
-      byId('responseSummary').textContent = '';
-    }
-
-    function refresh() {
-      const caps = state.caps;
-      const on = byId('webSearch').value === 'true';
-      ['webSearchType', 'allowedCallers', 'responseInclusion', 'maxUses'].forEach(
-        (id) => { byId(id).disabled = !on; }
-      );
-      byId('responseInclusion').disabled = !on
-        || state.data.controls.response_inclusion.status !== 'Editable';
-
-      const callerControl = state.data.controls.allowed_callers;
-      const chosen = byId('allowedCallers').value;
-      // Only a choice the user could actually make can be blocked. When the
-      // control is runtime-fixed the value is a fact about the request - for
-      // web_search_20250305 the effective caller really is "direct" - and the
-      // request stays legal, so Send must stay available.
-      const off = !!callerControl.editable && chosen === 'direct';
-      byId('allowedCallersNote').textContent = off
-        ? '[' + 'API supported · not exposed by llm-anthropic' + '] sending is blocked: '
-          + 'the request would still use the API default'
-        : '[' + callerControl.status + '] ' + callerControl.note;
-      state.blocked = off;
-      byId('blockedNote').textContent = off ? byId('allowedCallersNote').textContent : '';
-      byId('send').disabled = state.blocked || state.fits === false;
-    }
-
-    function apply(data) {
-      state.data = data;
-      const caps = data.capabilities;
-      state.caps = caps;
-      state.fits = data.context ? data.context.fits : null;
-
-      byId('contextWindow').textContent = 'context window '
-        + fmt(caps.context_window) + ' tokens · ' + caps.context_window_source;
-      byId('maxTokens').max = caps.max_output_tokens || '';
-      byId('maxTokens').value = data.defaults.max_tokens;
-
-      byId('ttlNote').textContent = '[' + data.controls.cache_control.ttl.status + '] '
-        + data.controls.cache_control.ttl.value + ' · ' + data.controls.cache_control.ttl.note;
-
-      // Streaming is not a choice here: llm-anthropic always opens a stream.
-      const streamControl = data.controls.stream;
-      setOptions(byId('stream'), streamControl.options, {
-        ON: 'ON', OFF: 'OFF (API supported · not used by llm-anthropic)'
-      });
-      byId('stream').value = 'ON';
-      byId('stream').disabled = true;
-      byId('streamNote').textContent = '[' + streamControl.status + '] ' + streamControl.note;
-
-      const src = data.model_data;
-      const label = {
-        'models-api': {disk: 'Models API (cached)', live: 'Models API (live)',
-                       'stale-disk': 'Models API (stale cache)'}[src.cache] || 'Models API',
-        fallback: 'fallback profile ' + src.profile_version
-      }[src.source] || src.source;
-      byId('modelDataSource').textContent = label;
-      byId('modelDataNote').textContent = src.source === 'models-api'
-        ? 'fetched ' + (src.fetched_at || 'unknown')
-        : 'Models API unavailable (' + (src.error || 'unknown') + ') - showing the '
-          + src.profile_version + ' profile, not live data';
-
-      // Thinking: its own control, with the official mode and default state.
-      const thinkingControl = data.controls.thinking;
-      setOptions(byId('thinking'), thinkingControl.options, {
-        on: 'ON (' + caps.thinking_mode + ')', off: 'OFF'
-      });
-      byId('thinking').value = thinkingControl.value;
-      byId('thinking').disabled = thinkingControl.status !== 'Editable';
-      byId('thinkingNote').textContent = '[' + thinkingControl.status + '] ' + thinkingControl.note;
-
-      applyEffortState();
-      applyThinkingState();
-
-      const typeControl = data.controls.web_search_type;
-      setOptions(byId('webSearchType'), typeControl.options, {});
-      byId('webSearchType').value = typeControl.value || '';
-      byId('webSearchType').disabled = true;
-      byId('webSearchTypeNote').textContent = '[' + typeControl.status + '] ' + typeControl.note;
-
-      const callerControl = data.controls.allowed_callers;
-      const callerLabels = {};
-      callerControl.options.forEach((option) => {
-        callerLabels[option.value] = option.value + ' (' + option.note + ')';
-      });
-      setOptions(byId('allowedCallers'), callerControl.options, callerLabels);
-      byId('allowedCallers').value = callerControl.value || '';
-      // A control the runtime cannot honour is shown, not offered as a choice.
-      byId('allowedCallers').disabled = !callerControl.editable;
-
-      const inclusion = data.controls.response_inclusion;
-      byId('responseInclusionNote').textContent = '[' + inclusion.status + '] ' + inclusion.note;
-
-      byId('dynamicFiltering').textContent = data.controls.dynamic_filtering.value;
-      byId('dynamicFilteringNote').textContent = data.controls.dynamic_filtering.note;
-
-      showContext(data.context);
-      refresh();
-      schedulePreview();
-    }
-
-    byId('tabRequest').addEventListener('click', () => setTab('request'));
-    byId('tabResponse').addEventListener('click', () => setTab('response'));
-    byId('prompt').addEventListener('input', () => { state.selected = null; renderPane(); });
-
-    // --- conversations -------------------------------------------------------
-    // Storage is llm's own SQLite, so anything saved here shows up in
-    // `llm logs` too, and anything saved there is reachable from this list.
-
-    async function loadConversations() {
-      const data = await (await fetch('/api/conversations')).json();
-      if (data.error) {
-        byId('historyNote').textContent = data.error;
-        return;
-      }
-      const list = byId('conversationList');
-      list.innerHTML = '';
-      data.items.forEach((item) => {
-        const button = document.createElement('button');
-        button.className = 'conversation'
-          + (item.id === state.conversationId ? ' current' : '');
-        const label = document.createTextNode(item.name);
-        const meta = document.createElement('small');
-        meta.textContent = item.turns + ' turn' + (item.turns === 1 ? '' : 's')
-          + ' · ' + (item.last_turn || '').replace('T', ' ').slice(0, 16);
-        button.appendChild(label);
-        button.appendChild(meta);
-        button.addEventListener('click', () => openConversation(item.id));
-        list.appendChild(button);
-      });
-    }
-
-    async function openConversation(id) {
-      const data = await (await fetch('/api/conversations/' + id)).json();
-      if (data.error) {
-        byId('blockedNote').textContent = data.error;
-        return;
-      }
-      log.innerHTML = '';
-      state.conversationId = id;
-      state.turns = data.turns;
-      const first = data.turns[0];
-      if (first) {
-        byId('model').value = (first.options || {}).model || byId('model').value;
-        await loadForm();
-      }
-      data.turns.forEach((record, index) => {
-        // Both panes of a stored turn come from what was recorded, never from
-        // a second reconstruction of the provider response.
-        const user = addMessage('user', record.user_input);
-        addMessage('assistant', record.response.text || '');
-        [user, log.lastChild].forEach((node) => {
-          node.addEventListener('click', () => {
-            state.selected = index;
-            setTab(index === data.turns.length - 1 ? 'request' : 'request');
-            showTurn(index);
-          });
-        });
-      });
-      state.selected = data.turns.length - 1;
-      showTurn(state.selected);
-      loadConversations();
-    }
-
-    function showTurn(index) {
-      const record = state.turns[index];
-      if (!record) return;
-      state.selected = index;
-      state.request = {
-        code: record.rendered_code,
-        status: 'request · turn ' + (index + 1) + ' of this conversation, as it was sent'
-      };
-      setTab(state.tab);
-    }
-
-    function startNewConversation() {
-      log.innerHTML = '';
-      state.conversationId = null;
-      state.turns = [];
-      state.selected = null;
-      state.request = null;
-      byId('prompt').value = '';
-      renderPane();
-      loadConversations();
-      // Told explicitly on the next send, so the server cannot mistake an
-      // empty id for the conversation this tab was using a moment ago.
-      state.fresh = true;
-    }
-
-    byId('newConversation').addEventListener('click', startNewConversation);
-
-    async function loadForm() {
-      const model = byId('model').value;
-      const query = model ? '?model=' + encodeURIComponent(model) : '';
-      const response = await fetch('/api/form' + query);
-      const data = await response.json();
-      if (data.error) {
-        byId('blockedNote').textContent = data.error;
-        byId('send').disabled = true;
-        return;
-      }
-      if (!byId('model').options.length) {
-        setOptions(byId('model'), data.models.map((value) => ({value})), {});
-        byId('model').value = data.model.id;
-      }
-      apply(data);
-    }
-
-    ['webSearch', 'webSearchType', 'allowedCallers'].forEach(
-      (id) => byId(id).addEventListener('change', refresh)
-    );
-    byId('thinking').addEventListener('change', () => {
-      applyEffortState();
-      applyThinkingState();
-      refresh();
-    });
-    byId('model').addEventListener('change', loadForm);
-
-    // Any change to the form rebuilds the preview, so the right pane always
-    // answers "what would Send put on the wire" before it costs anything.
-    ['model', 'thinking', 'effort', 'webSearch', 'webSearchType', 'allowedCallers',
-     'responseInclusion', 'maxUses', 'cacheControl', 'system', 'maxTokens', 'prompt'
-    ].forEach((id) => {
-      byId(id).addEventListener('change', schedulePreview);
-      byId(id).addEventListener('input', schedulePreview);
-    });
-
-    byId('send').addEventListener('click', async () => {
-      if (streaming || byId('send').disabled) return;
-      const text = byId('prompt').value.trim();
-      if (!text) return;
-      streaming = true;
-      addMessage('user', text);
-      byId('prompt').value = '';
-      const body = addMessage('assistant', '');
-      const sent = payload(text);
-      state.fresh = false;
-
-      const response = await fetch('/api/chat/stream', {
-        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(sent)
-      });
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop();
-        for (const part of parts) {
-          if (!part.startsWith('data: ')) continue;
-          const event = JSON.parse(part.slice(6));
-          if (event.type === 'prepared') {
-            byId('code').textContent = event.code;
-            byId('codeStatus').textContent = 'sent · the request that was executed';
-            state.request = { code: event.code, status: byId('codeStatus').textContent };
-            if (state.tab === 'request') renderPane();
-            // The truth about dynamic filtering is what went on the request.
-            byId('dynamicFiltering').textContent = event.dynamic_filtering;
-            byId('dynamicFilteringNote').textContent =
-              'read from the request · effective allowed_callers: ' + event.allowed_callers;
-            showContext(event.context);
-          } else if (event.type === 'text') {
-            body.textContent += event.text;
-            log.scrollTop = log.scrollHeight;
-          } else if (event.type === 'done') {
-            body.textContent = event.text;
-            state.fits = event.context ? event.context.fits : null;
-            showContext(event.context);
-            log.scrollTop = log.scrollHeight;
-          } else if (event.type === 'record') {
-            // One record drives every view of the turn: the bubble above was
-            // already written from the same Message this came from.
-            state.turns.push(event.record);
-            state.selected = state.turns.length - 1;
-            if (event.saved) {
-              state.conversationId = event.record.conversation_id;
-              byId('blockedNote').textContent = '';
-            } else {
-              // A completed, billed turn that is not in history is a loss the
-              // page has to say out loud.
-              byId('blockedNote').textContent =
-                'turn sent but NOT saved to history: ' + (event.error || 'unknown error');
-            }
-            loadConversations();
-          } else if (event.type === 'error') {
-            body.innerHTML = '';
-            body.className = 'error';
-            body.textContent = event.error === 'missing_api_key'
-              ? 'No Anthropic key found. Nothing was sent. Set one with: llm keys set anthropic'
-              : event.error;
-          }
-        }
-      }
-      streaming = false;
-    });
-
-    loadForm();
-    loadConversations();
-    setTab('request');
-  </script>
+  <div class="scard" id="settingsCard" hidden></div>
+  <!-- A control status is a reason, not a reading: one dot in the layout,
+       the sentence here on hover. Fixed, so a scroller cannot clip it. -->
+  <div class="scard whytip" id="whyTip" hidden></div>
+  <!-- Where a pill's menu is mounted. It is anchored to its pill but must
+       not be a child of one: the pill row is a scroller and clips anything
+       hanging below it, which is how the menus came to open invisibly. -->
+  <div id="pillLayer"></div>
+  <script src="/static/vendor/prism.min.js"></script>
+  <script src="/static/vendor/prism-python.min.js"></script>
+  <script src="/static/vendor/prism-json.min.js"></script>
+  <script src="/static/vendor/prism-line-numbers.min.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

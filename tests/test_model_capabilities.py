@@ -460,17 +460,12 @@ def test_form_endpoint_rejects_a_model_outside_the_matrix():
     assert response.status_code == 400
 
 
-def test_the_ui_holds_no_model_specific_logic():
+def test_the_ui_holds_no_model_specific_logic(static_page):
     """Capabilities must come from the matrix, not from UI conditionals."""
-    from pathlib import Path
-
-    import llm_sdk_view
-
-    html = (Path(llm_sdk_view.__file__).parent / "static" / "index.html").read_text("utf-8")
-    lowered = html.lower()
+    lowered = static_page.lower()
 
     for model_id in FOUR_MODELS:
-        assert model_id not in html, f"{model_id} must not be hard-coded in the UI"
+        assert model_id not in static_page, f"{model_id} must not be hard-coded in the UI"
     for marker in ("always_thinks", "supports_adaptive_thinking", "default_max_tokens"):
         assert marker not in lowered, f"{marker} must not appear in the UI"
 
@@ -496,3 +491,29 @@ def test_cache_control_off_marks_nothing_for_every_model(model_id, make_session)
         for block in message["content"]:
             assert "cache_control" not in block
     assert "cache_control" not in prepared.code
+
+
+# --- the documented minimum cacheable prompt length ---------------------------
+# The Models API does not expose it, so it is a hard-coded narrow rule keyed
+# by model family - the one place allowed to know these numbers.
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("claude-haiku-4-5-20251001", 4096),
+        ("claude-sonnet-5", 1024),
+        ("claude-opus-5-5", 512),
+    ],
+)
+def test_the_documented_cache_minimum_is_a_capability_flag(model_id, expected):
+    capabilities = capabilities_for(model_id)
+
+    assert capabilities.min_cacheable_tokens == expected
+    assert capabilities.min_cacheable_tokens_source.startswith("Anthropic documented")
+
+
+def test_an_unknown_family_reports_none_rather_than_guessing():
+    from llm_sdk_view.capabilities import min_cacheable_tokens_for
+
+    assert min_cacheable_tokens_for("claude-something-new-1") is None

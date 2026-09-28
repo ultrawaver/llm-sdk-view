@@ -318,10 +318,9 @@ def test_the_form_reports_provenance(isolated_cache, record, with_key):
     assert data["model_data"]["profile_version"] == "2026-09-26"
 
 
-def test_the_ui_shows_the_provenance_rather_than_assuming_it():
-    import llm_sdk_view
-
-    html = (Path(llm_sdk_view.__file__).parent / "static" / "index.html").read_text("utf-8")
-
-    assert "model_data" in html
-    assert "fallback profile" in html
+def test_the_ui_shows_the_provenance_rather_than_assuming_it(static_page):
+    # The footer's dedicated row is gone; the provenance now rides the
+    # context-window line in the params panel ("context window N tokens ·
+    # <source>"), which names the source instead of assuming live data.
+    assert "context_window_source" in static_page
+    assert "contextWindow" in static_page

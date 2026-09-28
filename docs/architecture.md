@@ -52,8 +52,67 @@ model id.
 Thinking and effort are separate controls, because they are separate API
 fields: `thinking` produces the `thinking` block, `effort` produces
 `output_config.effort`. The budget inside an extended-thinking block is a
-runtime fact, not a setting: `llm-anthropic` hard-codes it, so the form shows
-it read-only.
+runtime fact, not a setting: `llm-anthropic` hard-codes it, so it appears
+nowhere as a control - what the UI enforces instead is the floor it puts under
+`max_tokens` (the budget plus one while thinking is enabled).
+
+## The settings surface
+
+The request's settings are eight pills in the topbar (Model, Thinking, Effort,
+Max tokens, System, Web Search, Caching, Streaming). The pre-pills form
+controls survive as a hidden value store, and that store is the only one:
+every pill menu writes back into a control and fires its change event, so the
+payload, the validation and the preview read exactly what they read before the
+pills existed. A pill is therefore never able to drift from what Send builds.
+
+The row itself has two structural rules, both paid for by the same defect -
+pills whose menus opened invisibly, and pills that ignored a click outright:
+
+- **A menu is never a descendant of its pill.** The row is a horizontal
+  scroller, and `overflow-x: auto` computes `overflow-y` to `auto` too, so a
+  28px-tall row clips everything hanging below it. A menu positioned inside a
+  pill is in the DOM, reports `display: block`, and is painted nowhere. Menus
+  and the status card are both fixed-position overlays in `#pillLayer`, placed
+  from their pill's own rect by one routine, `anchorOverlay`.
+- **The row is updated in place, never rebuilt.** It re-renders whenever any
+  control changes, including a control one of its own menus just wrote.
+  Replacing the nodes did that in the middle of the user's gesture: the press
+  that blurs a menu field commits it, the commit re-renders, and the node the
+  press landed on is detached before the button comes back up - at which point
+  the browser dispatches no click at all. The eight buttons outlive every
+  render, only their contents change, and `.pill > * { pointer-events: none }`
+  keeps the button itself the thing the pointer lands on.
+
+The row aligns right with `justify-content: safe flex-end`, not `flex-end`:
+plain end alignment pushes the overflow past the start edge, where it is not
+scrollable, and three pills sat at negative x in a 900px window with the row
+reporting no scrollable overflow at all.
+
+Because none of this is visible in the source - a clipped element keeps its
+box, its computed style and its place in the DOM - the topbar is the one
+surface with tests that drive a real browser
+(`tests/test_topbar_in_a_browser.py`): a hit test inside the element's own
+rectangle, a walk up the ancestor chain for `overflow`, and clicks that have
+to reach a handler. They run as part of `pytest` and skip without a browser;
+CI sets `LLM_SDK_VIEW_REQUIRE_BROWSER=1` so a skip there is a failure.
+
+Two display rules fall out of the honesty rules:
+
+- A pill the model or the runtime cannot honour is dashed and grey with the
+  reason attached (Effort on a model with no effort parameter, Thinking on an
+  always-on model, Streaming). It is never a clickable fake.
+- The effort menu lists only the model's real levels; the level Anthropic
+  documents as the default carries a `default` tag and stores `default`, so
+  picking it sends no effort field at all. Absence on the wire means the
+  provider default applied - never that a value was lost (see
+  `docs/per-turn-settings.md` §1b).
+
+History shows each turn's settings through the same honesty lens: a hover card
+per bubble read from the turn's stored `effective_options` (a turn with no
+sidecar row says "not recorded"), a dashed divider between turns whose stored
+settings differ, and a cache hint that fires only for fields inside the cache
+prefix (model, system, the web-search tool's shape) - `max_tokens`, `effort`
+and `thinking` are not part of the prefix and never warn.
 
 ## Control status
 
@@ -71,11 +130,29 @@ Every form control reports one status, so a greyed-out value always says why:
 ## Context
 
 The context meter shows `tokens / limit`, a percentage, and the source of both
-numbers. Before a turn it is an estimate (there is no bundled tokenizer, and
-counting tokens would be a paid API call) and says so; after a turn the API's
-own `usage` replaces it. When the estimate plus the reserved output cannot fit,
-sending is refused with the two ways out — lower `max_tokens` or start a new
-conversation. Nothing compacts, summarises or silently trims the history.
+numbers. Three sources, in the order they are trusted:
+
+1. `API count` — `client.messages.count_tokens()`, which Anthropic documents as
+   free, against the exact request `prepare()` built
+   (`llm_sdk_view/token_count.py`: background thread, in-memory cache, never
+   blocking, never raising into a request path).
+2. `API usage` — the provider's own counts from the last turn in the
+   conversation, which is why reopening a two-turn conversation shows its real
+   weight instead of a character count. `API usage + estimated draft` is that
+   figure plus the message being typed.
+3. `estimated` — a character count, and only that. Measured against the API's
+   counter: Latin text is ~4 characters per token, CJK ~1 character per token.
+
+The counter is worth the round trip because the largest cost in this app's
+requests is invisible locally: Anthropic expands the 70-character `web_search`
+stub into roughly 2,200 input tokens (measured 2026-09-27: haiku-4-5 went from
+12 tokens to 2,220 when the stub was added, sonnet-5 from 12 to 2,806). Nothing
+in the request body shows them.
+
+When the figure plus the reserved output cannot fit, sending is refused with the
+two ways out — lower `max_tokens` or start a new conversation. The same figure
+feeds that check, so the meter and the refusal never disagree. Nothing compacts,
+summarises or silently trims the history.
 
 ## Request path
 
@@ -136,6 +213,14 @@ The Response is read off the Message the provider finished with, never
 reassembled from streamed text: thinking blocks, citations, tool results and
 usage counters only exist there. Nothing that surface shows is derived from
 the bubble, so the two cannot disagree.
+
+The record is also what a bubble is a handle on. Both ends of a turn select
+the same record and differ only in which pane eats the click: the user's
+bubble opens the Request, the assistant's opens the Response. The time above
+each bubble is that record's own stamp — llm's `datetime_utc` for the turn —
+converted to the computer's zone in the page, with no second clock taken
+anywhere along the way. A turn with no stamp shows no time rather than the
+time it was looked at.
 
 ## History lives in llm's database
 

@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .pricing import cost_breakdown
+
 SOURCE = "llm-sdk-view"
 
 # Titles come from the first user message, not from a model call.
@@ -120,6 +122,32 @@ def _number(value: Any) -> Any:
     return value if isinstance(value, int) else None
 
 
+def _duration_ms(response: Any) -> int | None:
+    """llm's own wall-clock measurement for this response, or None.
+
+    llm times every call from dispatch to stream end and exposes it as
+    ``duration_ms``. The Anthropic Console reports a server-side figure the
+    API never returns, so this client-side measurement is the honest one
+    available here; it includes streaming drain time and network.
+    """
+    getter = getattr(response, "duration_ms", None)
+    if getter is None:
+        return None
+    try:
+        value = getter() if callable(getter) else getter
+    except Exception:
+        # A response that never finished has no duration to report.
+        return None
+    return value if isinstance(value, int) and value >= 0 else None
+
+
+def format_duration(duration_ms: int | None) -> str | None:
+    """0.34 s style, matching the Console's Latency column."""
+    if not isinstance(duration_ms, int) or duration_ms < 0:
+        return None
+    return f"{duration_ms / 1000:.2f} s"
+
+
 def usage_summary(usage: dict) -> str:
     """One line: what this turn cost, including cache and search."""
     parts = [
@@ -134,6 +162,83 @@ def usage_summary(usage: dict) -> str:
 
 def _fmt_number(value: Any) -> str:
     return str(value) if isinstance(value, int) else "unreported"
+
+
+# --- the official Raw shape -------------------------------------------------
+#
+# The Response pane shows the Message the way the API returned it, so these
+# orders exist to put it back the way the official Playground prints it. They
+# are presentation only: a key the API adds later is appended, never dropped,
+# and a key it does not send is never invented.
+
+RAW_MESSAGE_KEYS = (
+    "model",
+    "id",
+    "type",
+    "role",
+    "content",
+    "container",
+    "stop_reason",
+    "stop_sequence",
+    "stop_details",
+    "usage",
+    "diagnostics",
+)
+
+RAW_USAGE_KEYS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation",
+    "output_tokens",
+    "service_tier",
+    "inference_geo",
+)
+
+RAW_CACHE_CREATION_KEYS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+RAW_TEXT_BLOCK_KEYS = ("type", "text", "citations")
+
+# Counts this app hoists out of the API's own usage object. They are ours, so
+# they must not appear in a view that claims to be the provider's Raw JSON.
+DERIVED_USAGE_KEYS = ("web_search_requests",)
+
+
+def _ordered(source: dict, order: tuple[str, ...]) -> dict:
+    """Known keys in ``order`` first, then anything the API added later."""
+    known = [key for key in order if key in source]
+    extra = [key for key in source if key not in order]
+    return {key: source[key] for key in known + extra}
+
+
+def raw_message(message: dict | None, usage: dict) -> dict | None:
+    """The Message as the API returned it, with ``usage`` back on it.
+
+    ``llm-anthropic`` moves ``usage`` off the Message and onto its own Response
+    while it consumes the stream, so a Raw view has to put it back. Anything
+    this app derived is left out; anything the API did not report stays absent
+    rather than being filled in with a zero.
+    """
+    if not message:
+        return None
+    rebuilt = dict(message)
+    if usage:
+        cleaned = {
+            key: value for key, value in usage.items() if key not in DERIVED_USAGE_KEYS
+        }
+        cache_creation = cleaned.get("cache_creation")
+        if isinstance(cache_creation, dict):
+            cleaned["cache_creation"] = _ordered(cache_creation, RAW_CACHE_CREATION_KEYS)
+        rebuilt["usage"] = _ordered(cleaned, RAW_USAGE_KEYS)
+    content = rebuilt.get("content")
+    if isinstance(content, list):
+        rebuilt["content"] = [
+            _ordered(block, RAW_TEXT_BLOCK_KEYS)
+            if isinstance(block, dict)
+            else block
+            for block in content
+        ]
+    return _ordered(rebuilt, RAW_MESSAGE_KEYS)
 
 
 @dataclass(frozen=True)
@@ -153,9 +258,40 @@ class ResponseView:
     stop_reason: str | None
     usage: dict
     response_json: dict | None
+    # Client-side latency. duration_ms is llm's own measurement (dispatch to
+    # stream end); ttft_ms is this app's time to the first text chunk.
+    # Older stored records predate both, so None means "not measured".
+    duration_ms: int | None = None
+    ttft_ms: int | None = None
 
     def summary(self) -> str:
         return usage_summary(self.usage)
+
+    def latency_summary(self) -> str | None:
+        duration = format_duration(self.duration_ms)
+        if duration is None:
+            return None
+        return f"latency {duration} (client-measured, includes streaming)"
+
+    @property
+    def raw(self) -> dict | None:
+        """The Message as the API returned it: official keys in official order.
+
+        This is what the Response pane shows. Everything else on this object -
+        ``text``, ``thinking``, ``citations``, ``summary``, the latency figures -
+        is this app's reading of the same record and stays out of the JSON.
+        """
+        return raw_message(self.response_json, self.usage)
+
+    @property
+    def cost(self) -> dict | None:
+        """The turn's cost, line by line, from published rates.
+
+        Derived like ``raw``: recomputed on read, so a rate-table update
+        re-prices every stored conversation. None when the model's rates are
+        unknown - an estimate is never invented.
+        """
+        return cost_breakdown(self.model, self.usage)
 
     def as_dict(self) -> dict:
         return {
@@ -171,6 +307,14 @@ class ResponseView:
             "usage": self.usage,
             "summary": self.summary(),
             "response_json": self.response_json,
+            "duration_ms": self.duration_ms,
+            "ttft_ms": self.ttft_ms,
+            # Derived, so it is recomputed rather than read back: a stored
+            # copy would go stale the moment the order or the rules change.
+            "raw": self.raw,
+            # Derived for the same reason: rates are versioned, and a stored
+            # total would silently keep yesterday's prices.
+            "cost": self.cost,
         }
 
     @classmethod
@@ -187,10 +331,12 @@ class ResponseView:
             stop_reason=data.get("stop_reason"),
             usage=data.get("usage") or {},
             response_json=data.get("response_json"),
+            duration_ms=data.get("duration_ms"),
+            ttft_ms=data.get("ttft_ms"),
         )
 
 
-def build_response_view(response: Any) -> ResponseView:
+def build_response_view(response: Any, ttft_ms: int | None = None) -> ResponseView:
     """Read the Answer off the Message the SDK finished with.
 
     ``response_json`` is the accumulated Message, so citations, thinking and
@@ -210,6 +356,8 @@ def build_response_view(response: Any) -> ResponseView:
         stop_reason=message.get("stop_reason"),
         usage=_usage(response, message),
         response_json=message or None,
+        duration_ms=_duration_ms(response),
+        ttft_ms=ttft_ms,
     )
 
 

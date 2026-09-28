@@ -228,6 +228,24 @@ def load_conversation(thread_id: str, db: Database | None = None) -> dict | None
     }
 
 
+def rename_conversation(thread_id: str, name: str, db: Database | None = None) -> dict:
+    """Rename one stored conversation. Returns the id and the name kept.
+
+    The name is the user's own label on llm's own ``threads`` row, so the
+    sidebar, the chat title and ``llm logs`` all read the same string. An
+    unknown id is a KeyError, an empty name a ValueError: neither may be
+    reported as a rename that happened.
+    """
+    cleaned = " ".join((name or "").split())
+    if not cleaned:
+        raise ValueError("a conversation name must not be empty")
+    database = db or connect()
+    if not database["threads"].count_where("id = ?", [thread_id]):
+        raise KeyError(thread_id)
+    database["threads"].update(thread_id, {"name": cleaned})
+    return {"id": thread_id, "name": cleaned}
+
+
 def thread_messages(thread_id: str, db: Database | None = None) -> list[Any]:
     """The stored message chain, exactly as it was written.
 

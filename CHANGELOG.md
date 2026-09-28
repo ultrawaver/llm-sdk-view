@@ -182,3 +182,291 @@ which the offline suite could not see:
   hand-maintained rendering of the turn.
 - Offline tests covering multi-turn history, streaming, missing-key handling
   and the four Anthropic behaviours, using a faked Anthropic transport.
+
+### Changed on the UI overhaul step
+
+No behaviour change: same endpoints, same payload, same request truth. Only
+how the page looks and reads.
+
+- The single-file page is split into `static/index.html`, `static/app.css`
+  and `static/app.js`, served by a `/static/{name}` route that only serves
+  stylesheets and scripts from the asset directory. `pyproject.toml`
+  package data covers the new files.
+- Light and dark themes via `prefers-color-scheme`, all colours as CSS custom
+  properties; the page was dark-only with unstyled native controls before.
+- The flat thirteen-control form is now a collapsible `Build your request`
+  panel in the centre column: a one-line config summary when collapsed, five
+  accordion groups (Model & limits, Thinking, Web search, Caching,
+  Transport) with descriptions when expanded. Form and code stay visible
+  together, so the knob-to-code feedback loop survives.
+- The six control statuses render as badges (colour + icon + label) instead
+  of bracketed text, with a worst-status roll-up badge per group.
+- Boolean controls are Playground-style switches; the hidden select remains
+  the only value the payload reads.
+- The context meter is a bar with ok/warn/danger thresholds; the refusal
+  state stays a refusal, never a trim.
+- Inspector: segmented Request | Response control, syntax highlighting with
+  line numbers (vendored Prism 1.29.0: core, python, json, line-numbers - no
+  CDN, works offline), a copy button, a language chip, and a centred empty
+  state per tab.
+- Streaming shows a caret; a finished turn switches the inspector to the
+  Response tab; bubbles carry turn numbers; Send disables into `Sending…`
+  while a turn runs.
+- Keyboard: ⌘Enter send, ⌘B sidebar, ⌘, parameters, ⌘1/⌘2 tabs.
+- Tests that grepped `index.html` source now share a `static_page` fixture
+  that concatenates the page's own assets (vendored code excluded); the
+  assertions themselves are unchanged.
+
+### Added on the Playground-parity pass
+
+- The Request pane drops its explanatory comment. A request carries no
+  commentary; why streaming is fixed is now only the greyed-out stream
+  control's status.
+- The rendered layout follows the official Playground: a value stays on one
+  line when it fits (88 columns, the usual Python line length - the official
+  sample inlines 58 columns and explodes 104, so any threshold between them
+  reproduces it) and explodes when it does not. Short dicts and lists are
+  therefore no longer spread over a dozen lines.
+- The call ends the way the Playground ends it - `for text in
+  stream.text_stream: print(text, end="", flush=True)` - instead of a lone
+  `stream.get_final_message()`, which read like a one-shot fetch.
+- Key order is still exactly the order `llm-anthropic` assembled the request
+  in; nothing sorts or regroups it.
+- The Response pane shows the official Raw shape: the Message the API returned,
+  with `usage` re-attached (llm-anthropic pops it off while consuming the
+  stream). Official keys in the official order; a key the API adds later is
+  appended, never dropped, and a count it did not report stays absent rather
+  than being zero-filled. Everything this app derived - `text`, `thinking`,
+  `citations`, `summary`, `duration_ms`, `ttft_ms` and the hoisted
+  `web_search_requests` - is out of the JSON and stays on the summary line and
+  the bubble instead.
+
+### The context figure is measured, not guessed
+
+- The meter takes the provider's own numbers wherever it can, in this order:
+  `API count` (the free `count_tokens` endpoint, asked about the exact request
+  `prepare()` built), then `API usage` (the last turn's reported counts), then a
+  character estimate that says it is one. New module
+  `llm_sdk_view/token_count.py`: one background thread, an in-memory cache keyed
+  by request signature, a 60-second cooldown after a failure, and no way to
+  block or raise into a request path.
+- Fixed: reopening a stored conversation showed a figure out by a factor of 47.
+  A two-turn conversation the API had reported 2,265 input and 70 output tokens
+  for showed `49 tokens`, because the baseline was a character count that never
+  saw the history. The baseline now comes from the stored `usage`.
+- Fixed: the estimate read every language as English. Measured against the
+  API's own counter, Chinese is about one token per character rather than one
+  per four, so a Chinese conversation was under-counted four-fold.
+- The count is what sees the cost nothing local can: Anthropic expands this
+  app's 70-character `web_search` stub into roughly 2,200 input tokens
+  (measured 2026-09-27 - haiku-4-5 went 12 to 2,220, sonnet-5 12 to 2,806).
+  A brand-new conversation with `你好` typed now reads 2,216 tokens, not 2.
+- The refusal that guards the context window is computed from the same figure
+  the meter shows, and names its source, so the two cannot disagree.
+- The page looks again for a count that is still running - a bounded number of
+  times - so a fallback figure becomes the API's own number when it lands.
+
+### A bubble opens the pane that carries it
+
+- Clicking a bubble now decides which pane opens: the user's bubble is the
+  request that went out, the assistant's is the answer that came back. Before,
+  both ends opened the Request, which left the Response pane unreachable from
+  the conversation. A turn whose pane is open is marked, so the click has a
+  visible result.
+- Fixed: a turn sent in this page had no click handler at all - only turns
+  loaded from history were wired, so the reply that had just arrived was the
+  one turn whose response could not be opened from its bubble.
+- Each bubble carries the turn's own time above it, in the computer's zone,
+  the way a chat client shows it: time alone for today, day and time earlier
+  this year, the full date beyond that, with the un-ellipsised local stamp in
+  the tooltip. `Intl.DateTimeFormat` renders it, so the browser's locale
+  decides whether that is `6:41 PM` or `18:41`.
+- llm stores `datetime_utc`; the page converts instead of printing it. A stored
+  stamp with no zone on it is UTC here too, never the browser's zone - which is
+  how the sidebar used to misread it, printing UTC as if it were local time.
+- A bubble with no stamp shows nothing rather than "now": a turn that has not
+  been recorded has no clock, and inventing one would date a message to when it
+  was looked at. The live turn's bubbles take the record's stamp over from the
+  page's own send time the moment the record arrives, so the bubble and history
+  agree.
+
+### Settings moved to the topbar as pills
+
+- The collapsible "Build your request" panel is gone. The request's settings
+  are eight pills in the header - Model, Thinking, Effort, Max tokens, System,
+  Web Search, Caching, Streaming - each opening a small menu anchored to the
+  pill. The hidden form controls stay the single source of truth: every menu
+  writes back into a control and fires its change event, so the payload, the
+  validation and the preview read exactly what they always read.
+- A pill the model or the runtime cannot honour is dashed and grey with the
+  reason attached: Effort on Haiku (the model has no effort parameter),
+  Thinking on always-on models (Adaptive, fixed), Streaming (llm-anthropic
+  always streams). None of them is a fake control.
+- The effort menu lists only the model's levels, low to max: no synthetic
+  Default row. The level Anthropic documents as the default carries a
+  `default` tag and is what a fresh form selects; picking it stores "default",
+  so no effort field goes on the request at all.
+- The thinking budget is not shown anywhere as a setting: llm-anthropic
+  hard-codes it. What the Max tokens menu does enforce is the legal floor it
+  creates - with thinking enabled the minimum is the budget plus one (1025 on
+  Haiku), and the menu's input clamps to it.
+- History shows each turn's settings on hover: one card shared with the
+  pills, read from the turn's stored `effective_options`, with the fields
+  that differ from the previous turn dotted amber. A turn with no sidecar
+  row (a conversation written elsewhere) says its settings were not recorded
+  rather than guessing.
+- A dashed divider between two turns names the settings that changed there -
+  `thinking off → on · max_tokens 1024 → 16384` - so a conversation shows
+  where its own configuration moved.
+- Changing anything that is part of the cache prefix (model, system, the web
+  search tool's shape) warns above the composer that the next turn will not
+  reuse the cached prefix. max_tokens, effort and thinking are not part of
+  the prefix and never warn; with caching off the message is "won't read or
+  write", not "invalidated".
+- Keyboard: ⌘, is retired with the panel it toggled.
+
+### Added on the hover-status pass
+
+- A control status is a reason, not a reading: "runtime fixed" and
+  "Unsupported by selected model" no longer sit in the row. Each is a 13px
+  dot in the colour the badge had, and the whole sentence - status plus the
+  note that explains it - appears on hover in one fixed card (#whyTip), so
+  the pills scroller cannot clip it. One delegated mouseover pair covers
+  every dot, including ones rendered later; keyboard focus asks for it too.
+- A fixed or unsupported pill carries its reason on the whole pill
+  (data-tip), not on pill.title, and opens nothing as before.
+- Bubble clicks are answered by one listener on #messages reading the pane
+  off the bubble (data-pane), not by a handler per bubble, and a click
+  cancels a preview the last keystroke left queued - a dead-looking click
+  and a pane that reverted to the draft are both structurally impossible
+  now rather than merely unreproducible.
+
+### Added on the "the click does nothing" fix
+
+- The page's own css and js are served with a version in the URL
+  (`?v=<sha1(mtime, size)>`), `/` is `no-store`, and assets carry
+  `no-cache` + ETag. None of them had a cache header at all, so a browser
+  could keep a file this project had already replaced - which is how a fix
+  could ship twice and appear neither time.
+- A click on the turn already shown on the right changes nothing else on
+  screen, so the bubble now acknowledges it (a 300ms ring, `.msg.hit`). The
+  selected assistant bubble gets the accent background too; before, the only
+  sign of selection was a 1px border recolour.
+- The settings card is `pointer-events: none`: it describes a bubble and can
+  be drawn over one, and a read-only card has no business being a click
+  target.
+- `wireBubble()` writes the turn it was given. It used to be left to the
+  1-based number `addMessage` was handed, so the pane a bubble opens and the
+  turn it carried were written in two different places.
+
+### Fixed on the grey pill step
+
+- A fixed or unsupported pill (Effort on a model without the parameter,
+  Streaming always) opens no menu by design, but its click was met with
+  silence: no handler at all, so the one control that most needs to explain
+  itself looked simply dead. The click is now answered - unmistakably. The
+  first answer (re-show the reason card plus a background wash) still read
+  as dead, because hover had already put that exact card on screen and the
+  wash was near-invisible: freeze-framed screenshots of the click showed a
+  delta too small to perceive. The answer is now visibly NEW: the pill
+  shakes "no" (motion survives the scroller's shadow clipping and the human
+  eye) and the reason card pops back in an answered state - accent border,
+  full-strength text - that hover alone never gets.
+- `flash()` outlives the animation it starts: it used to remove the class
+  at 320ms, cutting a longer animation mid-frame.
+
+### Added on the stale build step
+
+- `GET /api/version` names the build the server would serve right now. The
+  page reads its own build off its script URL, stamps it in the sidebar
+  ("build 9e152046"), and whenever the tab regains focus it compares the
+  two. A mismatch raises a banner across the top - "This tab runs build X
+  but the server is on Y - click to reload" - because a tab that kept
+  yesterday's js reports bugs that no longer exist; one click bug was
+  reported three times before the page learned to say this itself.
+
+### Added on the conversation title step
+
+- The bar above the chat names the conversation the chat belongs to. An
+  unsaved conversation says "New conversation" instead of inventing a title;
+  the first saved turn's name arrives with the refreshed sidebar list.
+- The pencil next to the title renames the conversation in place (Enter or
+  leaving the field keeps the new name, Escape keeps the old, an empty name
+  is refused). The rename is one write to llm's own `threads` row through
+  `POST /api/conversations/{id}/name`, so the sidebar, the title bar and
+  `llm logs` all read the same string.
+
+### Fixed: the topbar pills opened nothing
+
+Three independent defects wore the same symptom - a pill that answers a click
+with nothing - and all three were in the layout, which is why three passes
+through the js found none of them. Measured in a real browser, not read:
+
+- **A menu was a child of its pill, and the pill row clips.** `#settingsPills`
+  is a horizontal scroller, and `overflow-x: auto` computes `overflow-y` to
+  `auto` as well, so the 28px-tall row clipped a menu that begins 4px below
+  it. Every js-level check passed - the handler ran, `stopPropagation` was
+  right, the node existed with `display: block`, `visibility: visible`,
+  `z-index: 70` - and the menu was painted nowhere. The page already knew
+  this: `#whyTip` is fixed-position with a comment saying the pills scroller
+  would clip an absolutely positioned child, written directly above the rule
+  that positioned the menus absolutely inside one. Menus now mount in a
+  `#pillLayer` overlay and are placed from the pill's rect by the same
+  routine that places the status card.
+- **The row was rebuilt under the user's own hand.** The pills re-render on
+  every control change, and the row was emptied and recreated each time. So
+  pressing a pill while a menu field held focus blurred the field, the field
+  committed, the commit re-rendered the row, and the element the press landed
+  on was detached before the button came back up - the browser then dispatched
+  no click at all. Editing Max uses, which lives inside the Web Search menu,
+  destroyed that menu for the same reason. The eight buttons now outlive every
+  render and only their contents change; an open menu is re-anchored rather
+  than discarded, and never rebuilt, so a field being typed into survives.
+- **Three pills were unreachable in a narrow window.** Found by the first run
+  of the new browser checks, not by a person. `justify-content: flex-end` on a
+  scroller sends the overflow past the *start* edge, and overflow in that
+  direction is not scrollable: at 900px the row reported `scrollWidth ===
+  clientWidth` while Model, Thinking and Effort sat at negative x. Not
+  clipped, not scrollable to - gone. `justify-content: safe flex-end` falls
+  back to start alignment the moment the pills stop fitting, so the row
+  scrolls and every pill stays right-aligned when there is room.
+- `.pill > * { pointer-events: none }`: a pill's contents are rewritten on
+  every render, so a press that landed on the label rather than the button
+  would still be left holding a detached node.
+- A menu is mounted before it is built. `focus()` on a field inside a detached
+  node does nothing, so the Max tokens menu opened with no caret and no
+  selection, and typing appended to the ceiling instead of replacing it
+  (16384 + "4096" = "163844096").
+- A pill that opens no menu now shows `cursor: help` rather than `default`: it
+  opens nothing, but it does answer a click with the reason it is grey.
+- Pills carry `aria-haspopup` and `aria-expanded`.
+### Added: the page is now tested in a browser
+
+The existing topbar suite is string matching over the concatenated assets,
+and it passed throughout all three defects. It cannot see a containing block,
+a computed style, a hit test, or an event the browser never dispatched -
+which is the whole reason they shipped and were then looked for in the wrong
+file three times.
+
+- `tests/test_topbar_in_a_browser.py` runs the real application on a real
+  port and drives the real page: whether a menu is the thing painted at its
+  own rectangle, whether any ancestor clips it, whether every pill is
+  reachable at 900px as well as 1500px, and whether pressing one pill while
+  another's field has focus both commits the field and opens the pill. It
+  found the third defect above on its first run.
+- The checks are marked `browser`, run as part of plain `pytest`, and skip
+  themselves when no browser is installed. `pip install -e '.[test,browser]'`
+  enables them; Playwright drives an installed Google Chrome, so there is
+  usually nothing to download.
+- CI sets `LLM_SDK_VIEW_REQUIRE_BROWSER=1`, which turns "no browser" from a
+  skip into a failure. A check that quietly skips is a check that is not
+  running, and that is the state this suite was already in.
+- The source-level regression tests now read CSS declarations rather than
+  searching for a string, because the defect was a correct declaration
+  (`position: absolute`) in the wrong containing block. Each was verified by
+  reintroducing the defect it names and confirming it fails.
+- `AGENTS.md` carries the five rules this cost: measure UI behaviour in a
+  browser instead of reading it; a string-matching test protects wording, not
+  behaviour; an overlay is never a descendant of anything inside a scroller;
+  never rebuild children from a handler that can fire mid-gesture; and
+  `justify-content: flex-end` on a scroller strands its own content.

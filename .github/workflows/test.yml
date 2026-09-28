@@ -19,7 +19,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -e '.[test]'
+      - run: pip install -e '.[test,browser]'
+      # The browser checks skip themselves without a browser, and a silently
+      # skipped check is how the defect they exist for shipped in the first
+      # place. The runner has no Chrome, so Playwright's own build is used.
+      - run: playwright install --with-deps chromium
       # Pinned to an exact commit of the contribution branch, because the
       # released llm-anthropic cannot express response_inclusion yet. Replace
       # with the plain PyPI dependency once it is merged upstream.
@@ -27,5 +31,8 @@ jobs:
       # so pip would otherwise treat the requirement as already satisfied.
       - run: pip install --force-reinstall --no-deps 'git+https://github.com/ultrawaver/llm-anthropic@1fe612526d89b1f381a6e480a3d32e05614103dd'
       - run: python -c "import inspect; from llm_anthropic import WebSearch; assert 'response_inclusion' in inspect.signature(WebSearch.__init__).parameters"
+      # A browser check that quietly skips is a check that is not running.
       - run: pytest
+        env:
+          LLM_SDK_VIEW_REQUIRE_BROWSER: "1"
       - run: ruff check .

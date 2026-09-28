@@ -22,6 +22,7 @@ what ``llm-anthropic`` exposes, and what this request actually sends.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, replace
 from math import ceil
@@ -68,6 +69,9 @@ UNLIMITED_MAX_USES = 0
 # Why llm-anthropic never calls messages.create(), quoted from its execute():
 # "The Anthropic SDK rejects non-streaming requests with large max_tokens
 # values because they may take longer than ten minutes."
+# Shown as the status of the greyed-out stream control and in /api/form. It is
+# deliberately NOT rendered into the code pane: that pane is the request, and a
+# request carries no commentary.
 STREAMING_TRANSPORT_NOTE = (
     "llm-anthropic always opens client.messages.stream(): the Anthropic API "
     "rejects non-streaming requests whose max_tokens could run past ten "
@@ -83,14 +87,24 @@ UNSUPPORTED_BY_TOOL = "Unsupported by current tool version"
 PROVIDER_DEFAULT = "Provider default"
 FALLBACK_DATA = "Fallback capability data"
 
-# No tokenizer ships with this project, and counting tokens would be a paid
-# API call, so a pre-send context figure is an estimate and says so.
-CHARS_PER_TOKEN = 4
+# How the context figure is named, in the order it is trusted. The counter and
+# the usage object are the provider's own numbers; the estimate is ours, and
+# says so in the one word the page checks.
+COUNTED = "API count"
+USAGE = "API usage"
+USAGE_WITH_ESTIMATE = "API usage + estimated draft"
+ESTIMATED = "estimated"
+UNKNOWN = "unknown"
 
-ESTIMATE_NOTE = (
-    f"estimated before sending (~{CHARS_PER_TOKEN} characters per token, no "
-    "tokenizer and no API call)"
-)
+# The last-resort estimate, measured against the API's own free counter on
+# 2026-09-27. Latin text really is about four characters per token - the old
+# single rule was right about English and wrong about everything else: Chinese
+# and Japanese measure at roughly one token per character, so a rule of four
+# under-counted a Chinese conversation four-fold. A message envelope (the few
+# tokens the API adds around a message) is left out of both, which is part of
+# why this is a fallback and not the figure the meter shows.
+LATIN_CHARS_PER_TOKEN = 4
+CJK_CHARS_PER_TOKEN = 1
 
 
 class MissingKeyError(RuntimeError):
@@ -319,8 +333,31 @@ def _verify_cache(options: ChatOptions, kwargs: dict) -> None:
 # --- context ----------------------------------------------------------------
 
 
+def _is_cjk(character: str) -> bool:
+    """Characters the four-characters-per-token rule cannot speak for.
+
+    Chinese, Japanese kana and Korean hangul all measure at roughly one token
+    per character, so counting them as a quarter of one is not a rounding
+    error, it is a different number.
+    """
+    code = ord(character)
+    return (
+        0x3000 <= code <= 0x30FF  # CJK punctuation, hiragana, katakana
+        or 0x3400 <= code <= 0x4DBF  # CJK ideographs, extension A
+        or 0x4E00 <= code <= 0x9FFF  # CJK ideographs, unified
+        or 0xAC00 <= code <= 0xD7AF  # hangul syllables
+        or 0xF900 <= code <= 0xFAFF  # CJK compatibility ideographs
+        or 0xFF00 <= code <= 0xFFEF  # fullwidth forms
+        or 0x20000 <= code <= 0x2FA1F  # CJK ideographs, extensions B onward
+    )
+
+
 def _estimate_text(text: str) -> int:
-    return max(1, ceil(len(text) / CHARS_PER_TOKEN)) if text else 0
+    if not text:
+        return 0
+    wide = sum(1 for character in text if _is_cjk(character))
+    narrow = len(text) - wide
+    return max(1, ceil(narrow / LATIN_CHARS_PER_TOKEN) + ceil(wide / CJK_CHARS_PER_TOKEN))
 
 
 def estimate_request_tokens(kwargs: dict) -> int | None:
@@ -372,6 +409,9 @@ class ContextState:
     percent: float | None
     reserved: int
     fits: bool | None
+    # True while the API's counter is being asked about this exact request, so
+    # the page knows to look again instead of keeping a fallback figure.
+    pending: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -383,6 +423,7 @@ class ContextState:
             "percent": self.percent,
             "reserved": self.reserved,
             "fits": self.fits,
+            "pending": self.pending,
         }
 
 
@@ -391,15 +432,39 @@ def context_state(
     capabilities: ModelCapabilities,
     usage: dict | None = None,
     reserved: int = 0,
+    counted: int | None = None,
+    draft: str = "",
 ) -> ContextState:
-    """Build the context figure: real usage when there is any, else an estimate."""
+    """Build the context figure from the best source that can answer.
+
+    In order: the API's own count of this exact request, the API's own usage
+    for the conversation so far, and only then a labelled estimate. The
+    estimate is the only one of the three that cannot see what the provider
+    adds for a server tool, which is why it is never preferred.
+
+    ``draft`` is the text that is not yet in ``usage`` - the message being
+    typed. It is estimated and added when there is no count to replace both.
+    """
     limit = capabilities.context_window
-    if usage is not None:
-        tokens = (usage.get("input") or 0) + (usage.get("output") or 0)
-        source = "API usage"
+    if counted is not None:
+        tokens = counted
+        source = COUNTED
+    elif usage is not None:
+        # Total input = uncached + cache write + cache read (the API's own
+        # accounting); the cached prefix occupies context exactly like fresh
+        # tokens do. The reply counts too: it is part of the next request.
+        tokens = (
+            (usage.get("input") or 0)
+            + (usage.get("cache_creation") or 0)
+            + (usage.get("cache_read") or 0)
+            + (usage.get("output") or 0)
+        )
+        added = _estimate_text(draft)
+        tokens += added
+        source = USAGE_WITH_ESTIMATE if added else USAGE
     else:
         tokens = estimate_request_tokens(kwargs)
-        source = "estimated" if tokens is not None else "unknown"
+        source = ESTIMATED if tokens is not None else UNKNOWN
 
     if limit is None or tokens is None:
         percent = None
@@ -747,6 +812,7 @@ class ChatSession:
         options: ChatOptions | None = None,
         conversation_id: str | None = None,
         history: list[Any] | None = None,
+        baseline_usage: dict | None = None,
     ):
         self.options = options or ChatOptions()
         self.capabilities = capabilities_for(self.options.model)
@@ -774,7 +840,11 @@ class ChatSession:
         self.conversation = self._new_conversation(conversation_id, history)
         self.last_response: Any = None
         self._last_kwargs: dict = {}
-        self._usage: dict | None = None
+        # The provider's counts for the last turn of this conversation, when
+        # the caller already knows them (a stored conversation being reopened).
+        # It is the same field a finished turn writes to, so the context figure
+        # has one baseline whether the turn was sent a second ago or last week.
+        self._usage: dict | None = baseline_usage
 
     def _new_conversation(
         self, conversation_id: str | None, history: list[Any] | None
@@ -932,6 +1002,36 @@ class ChatSession:
             reserved=self.options.max_tokens,
         )
 
+    @property
+    def baseline_usage(self) -> dict | None:
+        """The provider's own counts for the last turn in this conversation.
+
+        None until a turn has been sent here, or until the conversation was
+        opened with the counts it was stored with. It is what makes the context
+        figure exact the moment a stored conversation is reopened.
+        """
+        return self._usage
+
+    def measure(
+        self, kwargs: dict, text: str = "", counted: int | None = None
+    ) -> ContextState:
+        """The context figure for a prepared request.
+
+        The API's own count of this exact request wins; then its own usage for
+        this conversation plus the message being typed; then a labelled
+        estimate. :meth:`prepare` measures through this method too, so the
+        figure under the prompt and the figure inside the fit check cannot
+        disagree with each other.
+        """
+        return context_state(
+            kwargs,
+            self.capabilities,
+            usage=self._usage,
+            reserved=self.options.max_tokens,
+            counted=counted,
+            draft=text,
+        )
+
     def prepare(self, text: str) -> PreparedTurn:
         """Build this turn without sending it.
 
@@ -950,13 +1050,11 @@ class ChatSession:
         kwargs = self.model.build_kwargs(response.prompt, self.conversation)
         _verify(self.options, kwargs, self.capabilities)
         self._last_kwargs = kwargs
-        before = context_state(
-            kwargs, self.capabilities, usage=None, reserved=self.options.max_tokens
-        )
+        before = self.measure(kwargs, text)
         if before.fits is False:
             raise ValueError(
                 f"this request does not fit: about {before.tokens} input tokens "
-                f"(estimated) plus {self.options.max_tokens} reserved for the "
+                f"({before.source}) plus {self.options.max_tokens} reserved for the "
                 f"reply exceeds the {before.limit} token context window. Lower "
                 "max_tokens or start a new conversation - this UI never trims "
                 "the history for you"
@@ -965,7 +1063,7 @@ class ChatSession:
         return PreparedTurn(
             response=response,
             kwargs=kwargs,
-            code=render_kwargs(kwargs, transport=transport, note=STREAMING_TRANSPORT_NOTE),
+            code=render_kwargs(kwargs, transport=transport),
             dynamic_filtering=dynamic_filtering_state(kwargs),
             allowed_callers=effective_allowed_callers(kwargs),
             transport=transport,
@@ -985,9 +1083,18 @@ class ChatSession:
             usage = response.usage()
         except Exception:  # noqa: BLE001 - an unknown usage shape is not fatal
             return
+        # llm's input/output are the uncached counts; the cache counters live
+        # in the details llm-anthropic kept. The context the model actually
+        # saw is all three - counting only the uncached part under-reports
+        # the moment the cache starts doing its job.
+        details = getattr(response, "token_details", None)
+        if not isinstance(details, dict):
+            details = {}
         self._usage = {
             "input": getattr(usage, "input", None),
             "output": getattr(usage, "output", None),
+            "cache_creation": details.get("cache_creation_input_tokens"),
+            "cache_read": details.get("cache_read_input_tokens"),
         }
 
     def stream_turn(self, text: str) -> Iterator[dict]:
@@ -1007,8 +1114,15 @@ class ChatSession:
             "transport": prepared.transport,
             "context": prepared.context.as_dict(),
         }
+        # Time to the first text chunk, measured client-side. llm records
+        # the whole-call duration on the response; this is the "how long
+        # until words appear" half of the latency story.
+        started = time.monotonic()
+        ttft_ms: int | None = None
         for event in prepared.response.stream_events():
             if event.type == "text":
+                if ttft_ms is None:
+                    ttft_ms = int((time.monotonic() - started) * 1000)
                 yield {"type": "text", "text": event.chunk}
         self._record_usage(prepared.response)
         # Only now does a turn exist: before the stream ends there is no
@@ -1016,7 +1130,7 @@ class ChatSession:
         self.last_response = prepared.response
         yield {
             "type": "record",
-            "record": self.record(text, prepared).as_dict(),
+            "record": self.record(text, prepared, ttft_ms=ttft_ms).as_dict(),
         }
         yield {
             "type": "done",
@@ -1024,7 +1138,7 @@ class ChatSession:
             "context": self.context().as_dict(),
         }
 
-    def record(self, text: str, prepared: PreparedTurn) -> TurnRecord:
+    def record(self, text: str, prepared: PreparedTurn, ttft_ms: int | None = None) -> TurnRecord:
         """The one object every other view of this turn is derived from."""
         return TurnRecord(
             conversation_id=self.conversation_id,
@@ -1033,7 +1147,7 @@ class ChatSession:
             options=asdict(self.options),
             request_kwargs=prepared.kwargs,
             rendered_code=prepared.code,
-            response=build_response_view(prepared.response),
+            response=build_response_view(prepared.response, ttft_ms=ttft_ms),
             context=self.context().as_dict(),
         )
 

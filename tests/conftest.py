@@ -10,14 +10,121 @@ import copy
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
 import llm
 import llm_anthropic
 import pytest
 
+import llm_sdk_view
 from llm_sdk_view import capabilities as capabilities_module
-from llm_sdk_view import model_api
+from llm_sdk_view import model_api, rates_page
 from llm_sdk_view.chat import ChatOptions, ChatSession
+
+# The rates the pricing page currently publishes, for the models the suite
+# prices. Tests read these instead of the page, because a cost assertion that
+# only held while Anthropic's site was reachable would fail for the wrong
+# reason.
+KNOWN_RATES = {
+    "claude-fable-5-1": {
+        "input": 10.0,
+        "output": 50.0,
+        "cache_write_5m": 12.50,
+        "cache_write_1h": 20.0,
+        "cache_read": 0.25,
+    },
+    "claude-opus-5-5": {
+        "input": 4.0,
+        "output": 20.0,
+        "cache_write_5m": 5.0,
+        "cache_write_1h": 8.0,
+        "cache_read": 0.20,
+    },
+    "claude-sonnet-5": {
+        "input": 2.0,
+        "output": 10.0,
+        "cache_write_5m": 2.50,
+        "cache_write_1h": 4.0,
+        "cache_read": 0.20,
+    },
+    "claude-haiku-4-5": {
+        "input": 1.0,
+        "output": 5.0,
+        "cache_write_5m": 1.25,
+        "cache_write_1h": 2.0,
+        "cache_read": 0.10,
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def known_rates(monkeypatch):
+    """Unit prices without a network.
+
+    Prices come from the pricing page at runtime, so without this every cost
+    assertion would depend on a live fetch. The page-shaped cache below is
+    installed as if it had just been fetched; tests that exercise the fetching
+    itself replace it afterwards.
+    """
+
+    def cached():
+        return {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "rates": copy.deepcopy(KNOWN_RATES),
+        }
+
+    real = {
+        "load_cache": rates_page.load_cache,
+        "kick_refresh": rates_page.kick_refresh,
+    }
+
+    def use_real_cache():
+        """Give a test the real disk cache back, inside the isolated dir."""
+        monkeypatch.setattr(rates_page, "load_cache", real["load_cache"])
+        monkeypatch.setattr(rates_page, "kick_refresh", real["kick_refresh"])
+
+    monkeypatch.setattr(rates_page, "load_cache", cached)
+    monkeypatch.setattr(rates_page, "kick_refresh", lambda *args, **kwargs: False)
+    real["use_real_cache"] = use_real_cache
+    return real
+
+
+@pytest.fixture
+def static_page() -> str:
+    """Everything the page is built from, concatenated.
+
+    Assertions about what the page shows or does must survive the assets
+    being split across index.html / app.css / app.js - the behaviour they
+    protect lives in the page, not in one file. Vendored third-party code
+    (static/vendor/) is excluded on purpose.
+    """
+    root = Path(llm_sdk_view.__file__).parent / "static"
+    return "\n".join(
+        path.read_text("utf-8") for path in sorted(root.iterdir()) if path.is_file()
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_token_counting(monkeypatch):
+    """The API's token counter is free, but the suite still never reaches it.
+
+    The counter itself is replaced, not the code that calls it: ``kick``,
+    ``lookup`` and the cache are the things under test, and they behave exactly
+    as they do in the app once the client underneath them is a refusal. A test
+    that wants counts replaces the client with a table instead.
+    """
+    from llm_sdk_view import token_count
+
+    def refuse(api_key):
+        raise RuntimeError("tests never call the API")
+
+    token_count.reset()
+    monkeypatch.setattr(token_count, "client", refuse)
+    try:
+        yield token_count
+    finally:
+        token_count.reset()
 
 
 @pytest.fixture(autouse=True)

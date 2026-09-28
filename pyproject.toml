@@ -49,6 +49,14 @@ test = [
   "pytest-asyncio",
   "ruff>=0.16.0",
 ]
+# The browser checks drive the real page, because no amount of reading the
+# source can see a clipped overlay or a click the browser never dispatched.
+# They skip themselves without this, so the plain test extra stays light.
+# Playwright uses an installed Google Chrome if there is one, so
+# `playwright install chromium` is only needed on a machine without it.
+browser = [
+  "playwright>=1.48",
+]
 
 [build-system]
 requires = ["setuptools"]
@@ -58,4 +66,4 @@ build-backend = "setuptools.build_meta"
 include = ["llm_sdk_view*"]
 
 [tool.setuptools.package-data]
-llm_sdk_view = ["static/*.html", "models.json"]
+llm_sdk_view = ["static/*.html", "static/*.css", "static/*.js", "static/vendor/*", "models.json"]

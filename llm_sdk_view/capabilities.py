@@ -59,6 +59,40 @@ EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
 # form refuses the combination rather than risk a 400.
 EFFORT_LEVELS_NEEDING_THINKING = ("xhigh", "max")
 
+# Anthropic documents a minimum cacheable prompt length per model; shorter
+# prompts marked cache_control are silently processed without caching and no
+# error is returned. The Models API does not expose this number, so it is a
+# hard-coded narrow rule, stated in the prompt-caching docs. Longest prefix
+# wins; a model matching nothing reports None (unknown), never a guess.
+MIN_CACHEABLE_TOKENS_RULES = (
+    ("claude-opus-4-8", 1024),
+    ("claude-opus-4-7", 2048),
+    ("claude-opus-4-6", 4096),
+    ("claude-opus-4-5", 4096),
+    ("claude-opus-4-1", 1024),
+    ("claude-opus-5", 512),
+    ("claude-opus-4", 1024),
+    ("claude-sonnet-5", 1024),
+    ("claude-sonnet-4-6", 1024),
+    ("claude-sonnet-4-5", 1024),
+    ("claude-sonnet-4", 1024),
+    ("claude-haiku-4-5", 4096),
+    ("claude-haiku-3-5", 2048),
+    ("claude-mythos-preview", 2048),
+    ("claude-mythos-5", 512),
+    ("claude-fable-5", 512),
+)
+
+MIN_CACHEABLE_TOKENS_SOURCE = "Anthropic documented minimum (not exposed by the Models API)"
+
+
+def min_cacheable_tokens_for(api_model_id: str) -> int | None:
+    """The documented minimum cacheable prompt length, or None if unknown."""
+    for prefix, minimum in sorted(MIN_CACHEABLE_TOKENS_RULES, key=lambda r: -len(r[0])):
+        if api_model_id.startswith(prefix):
+            return minimum
+    return None
+
 # How long an in-process Models API snapshot may be reused before the disk
 # cache is consulted again.
 SNAPSHOT_TTL_SECONDS = 300
@@ -96,8 +130,10 @@ class ModelCapabilities:
     effective_allowed_callers: str | None
     dynamic_filtering: str
     cache_ttl: bool
-    data_source: str
-    verified: str
+    min_cacheable_tokens: int | None = None
+    min_cacheable_tokens_source: str = ""
+    data_source: str = ""
+    verified: str = ""
 
     def effort_options(self) -> tuple[str, ...]:
         """Effort levels the form offers. There is no "off": that is thinking."""
@@ -158,6 +194,8 @@ class ModelCapabilities:
             "effective_allowed_callers": self.effective_allowed_callers,
             "dynamic_filtering": self.dynamic_filtering,
             "cache_ttl": self.cache_ttl,
+            "min_cacheable_tokens": self.min_cacheable_tokens,
+            "min_cacheable_tokens_source": self.min_cacheable_tokens_source,
             "data_source": self.data_source,
             "verified": self.verified,
         }
@@ -428,6 +466,7 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
 
     budget = plugin_thinking_budget() if thinking_mode == "extended" else None
     effective_caller, dynamic_filtering = _effective_caller(web_search_type)
+    min_cacheable = min_cacheable_tokens_for(model.claude_model_id)
 
     return ModelCapabilities(
         id=model_id,
@@ -461,6 +500,11 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
         effective_allowed_callers=effective_caller,
         dynamic_filtering=dynamic_filtering,
         cache_ttl=tool_caps["cache_ttl"],
+        min_cacheable_tokens=min_cacheable,
+        min_cacheable_tokens_source=(
+            MIN_CACHEABLE_TOKENS_SOURCE if min_cacheable is not None
+            else "unknown for this model"
+        ),
         data_source="models-api" if api else f"fallback-profile-{data['profile_version']}",
         verified=data["profile_version"],
     )
