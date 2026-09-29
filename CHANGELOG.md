@@ -470,3 +470,144 @@ file three times.
   behaviour; an overlay is never a descendant of anything inside a scroller;
   never rebuild children from a handler that can fire mid-gesture; and
   `justify-content: flex-end` on a scroller strands its own content.
+
+### Added on the reading-experience and conversation-state step
+
+- A turn shows its reasoning as it arrives: the `reasoning` events stream into a
+  strip above the answer with a live clock, which folds itself away when the
+  first text lands and reports `Thought for 12.4s · 431 words`. A turn read back
+  from storage names no duration, because the stored row carries none - a clock
+  added later would be a number about the file, not about the answer.
+- The finished answer renders as Markdown through `safeMarkdown()`, which builds
+  DOM nodes and never assigns model output to `innerHTML`: headings, lists, bold
+  and italic, inline code, fenced blocks highlighted by the vendored Prism with
+  a copy button, and tables. The official Playground renders a table, so a table
+  in the answer is not a surprise here either.
+- The chat follows the stream only while it is already at the bottom. Scrolling
+  up to read detaches it and offers a `↓ New messages` pill back to the end.
+  Only a *decrease* in `scrollTop` unpins follow-mode, because a growing document
+  moves `scrollTop` up without the user touching anything; reading that as intent
+  unpinned the page several times a second. Reduced motion turns the smooth ride
+  off without turning the following off: `scrollChatToBottom()` asks for `smooth`
+  only when `prefers-reduced-motion` has not asked for less.
+- Fixed: every assistant bubble carried two blank lines at the top and one at
+  the bottom. The regions that are `display: flex` beat the browser's own
+  `[hidden]` rule - an author style wins over the UA sheet - so a region that was
+  hidden still took its gap. Each hidden region now states `display: none`
+  itself. A screenshot showed it; reading the js had not, in three passes.
+- A draft belongs to the conversation it was typed in: switching away and back
+  restores what was left in the composer, and sending clears only the draft it
+  sent.
+- Opening an older conversation restores the settings that conversation last
+  used - but only the values the selected model still offers. A value the model
+  does not have is left at the model's own default rather than written back as a
+  setting the request would then have to refuse.
+- Changing a setting above the composer says what it costs. A field that is part
+  of the cache prefix - model, system, the web search tool's shape - warns that
+  the next turn will not reuse the cached prefix; every other field says only
+  that the next turn is a new request. "Cache invalidated" about `max_tokens`
+  would have been a lie with a plausible sound to it.
+- The composer is 132px tall instead of one line high.
+- The Model menu lists one model per series, newest first, and names the count of
+  the earlier ones it is not showing. The rule is derived, not maintained:
+  `model_series.py` reads a family and a version out of an id - both the current
+  `claude-<family>-<major>[-<minor>]` form and the older
+  `claude-<major>[-<minor>]-<family>` one, with date suffixes and `-latest`
+  stripped - groups by family and keeps the newest version in each. A version the
+  rule cannot parse is grouped alone and so is never hidden: the fallback for
+  "we do not know what this is" is to show it.
+- A superseded model is still selectable and still sends. It is marked `legacy`
+  in the menu and answers as before, because a conversation pinned to it has to
+  keep working; only a model the installed plugin cannot resolve at all is
+  refused.
+- An unknown model no longer raises in `capabilities_for()`. It reports what it
+  cannot know - `Provider default`, no verified flag - instead of taking the page
+  down with it, which is what the previous `entry[...]` lookups would have done
+  for any id the profile had not seen.
+
+### The cache window is counted down, and a split can no longer hide a write
+
+Two independent things were wrong about the prompt-cache figures, and both were
+visible on one screen at the same time.
+
+- Fixed: a turn that used web search showed `Cache write 0` while its own response
+  JSON said `cache_creation_input_tokens: 8940`. The API had returned a
+  self-contradicting usage - a real 8,940-token write at the top level and
+  `cache_creation: {ephemeral_5m: 0, ephemeral_1h: 0}` underneath.
+  `pricing.py` trusted the nested split whenever it was present, so two zeros
+  covered the total: the write was billed at the uncached rate and the turn was
+  reported at $0.0137 instead of $0.0249. The top-level total is now the
+  authoritative fact and the split only carves the 1-hour part out of it, which is
+  the one thing the split is for. Cost is recomputed when it is read, so every
+  stored turn corrected itself on the next load rather than needing a migration.
+- The cost bar counts the prompt-cache window down. The moment a turn reports a
+  cache read or write, a badge shows the time left - green above a minute, amber
+  below it, red and bold with a slow pulse under thirty seconds, grey
+  `cache expired` at zero - with the long explanation ("send now - after 0:24 the
+  prefix is written again at 1.25× the input price") in the cost popover.
+  `prefers-reduced-motion` removes the pulse; the red is the information and the
+  pulse was only emphasis.
+- The countdown starts when the **answer landed**, which is not what Anthropic
+  documents. The prompt-caching page says the lifetime is measured "from the start
+  of the request that writes or reads the cache entry, not from the end of its
+  response", so a long streaming answer eats its own window - and with that anchor
+  a cache the model was plainly still reading showed as nearly expired while it
+  was still generating. This account's own usage counters disagree with the
+  documented rule: in a 13-turn conversation, turns starting 335.6s and 338.9s
+  after the previous request started still read the cache (196,792 and 242,523
+  tokens), past the 300s the docs describe, and both were long answers (167s,
+  163s) whose responses had landed only 168.2s and 175.7s earlier. Twelve reads in
+  that conversation, and only "the answer's end" explains all twelve. The badge
+  carries its basis in its tooltip, because a countdown that will not say where it
+  starts cannot be checked. The evidence is a lower bound - no miss was ever
+  observed, so the true deadline is still unproven - but the documented one is
+  ruled out.
+- The countdown stops in exactly two places: at zero, and when Send is pressed.
+  Sending freezes the badge at the margin the send had left and says so; the new
+  turn's record clears the freeze and counts five minutes from that answer's end.
+  A send that failed or had no key unfreezes too - no request, no new cache.
+- Fixed: the countdown read a stored stamp with `Date.parse`, which reads a
+  zone-less UTC stamp as local time and moves the anchor by the whole offset -
+  eight hours here, so a live cache read as `Expired 8:00 ago`. It uses the same
+  `momentOf()` the rest of the page uses.
+- Fixed: an old conversation said `Expired 4320:00 ago`, which is a duration, not
+  information. Past an hour the note counts in hours instead.
+- The countdown had no behavioural test at all: one assertion on
+  `'id="cacheState"' in static_page` protected the id, and the faked transport
+  produced no cache tokens, so nothing ever walked from a usage record to a badge -
+  the exact trap `AGENTS.md` names. There are now eighteen checks across
+  `tests/test_cache_countdown.py` and `tests/test_cache_countdown_in_a_browser.py`,
+  the latter measuring the badge's computed colour, weight and animation in every
+  state in a real page, a frozen badge that does not move for two seconds, and a
+  page under `prefers-reduced-motion` that does not pulse.
+
+### Each conversation can leave the app
+
+- Added `llm_sdk_view/export_md.py` and `GET /api/conversations/{id}/export.md`:
+  the whole conversation as one Markdown document - title, model, turn count,
+  total cost, the system prompt, then each turn's user message, thinking, answer,
+  sources and a one-line figure strip (latency, in/out tokens, cache activity,
+  cost). It is built from the same stored records the panes read, so what leaves
+  the app is what the app showed, and it is readable by another model without
+  drowning it in provider JSON. An unknown id is a 404 that writes nothing.
+- The download name keeps the conversation's own title, CJK included, through
+  RFC 5987's `filename*`. Fixed: the plain-ASCII fallback was the title with every
+  non-ASCII byte dropped, so a Chinese title downloaded as ` -2026-09-29.md`.
+  When nothing but digits and separators survives, the fallback now names the file
+  for what it is (`conversation-2026-09-29.md`) instead of shipping a mystery slug.
+- Each conversation in the sidebar carries a `…` on hover: **Export Markdown**
+  downloads the document, **Delete** removes the conversation. Delete is two
+  clicks on purpose - the first turns the item into its own confirmation - so a
+  misclick cannot cost a conversation, and deleting the conversation on screen
+  returns the page to a new conversation.
+- Added `DELETE /api/conversations/{id}` and `store.delete_conversation()`: the
+  thread, its turns and the sidecar row go in one transaction, in foreign-key
+  order. `turns` is also referenced by `turn_fragments`, `turn_search`,
+  `turn_tools` and `tool_instantiations`, and llm ships no delete API of its own,
+  so the cascade is written out here rather than assumed. llm's
+  content-addressed `messages` rows are shared by design and stay, exactly as
+  they would after `llm logs` pruning. An unknown id is a 404: a delete that
+  found nothing must not report itself as a delete that happened.
+- The menu mounts in the top-level overlay layer rather than inside the sidebar's
+  scroller - the rule the topbar pills had already paid for.
+
