@@ -190,6 +190,42 @@ def test_an_unsplit_write_total_is_a_five_minute_write():
     assert all(line["key"] != "cache_write_1h" for line in cost["lines"])
 
 
+def test_a_zero_split_cannot_hide_a_real_write_total():
+    # Seen in the wild: a web-search turn reported a 0 + 0 split against a
+    # total of 8,940, and the cost panel showed "Cache write 0" while the
+    # countdown ticked on the same 8,940. The total is the fact; the split
+    # is a detail that lost the right to override it.
+    usage = dict(
+        USAGE,
+        cache_creation_input_tokens=8940,
+        cache_creation={
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 0,
+        },
+    )
+    cost = cost_breakdown(FABLE, usage)
+
+    assert _line(cost, "cache_write_5m")["quantity"] == 8940
+    assert all(line["key"] != "cache_write_1h" for line in cost["lines"])
+
+
+def test_a_partial_split_still_answers_to_the_total():
+    # Even when the split is partly plausible, the total wins: the 1h detail
+    # keeps its claim, the unaccounted remainder lands on the 5m line.
+    usage = dict(
+        USAGE,
+        cache_creation_input_tokens=8940,
+        cache_creation={
+            "ephemeral_5m_input_tokens": 100,
+            "ephemeral_1h_input_tokens": 60,
+        },
+    )
+    cost = cost_breakdown(FABLE, usage)
+
+    assert _line(cost, "cache_write_1h")["quantity"] == 60
+    assert _line(cost, "cache_write_5m")["quantity"] == 8880
+
+
 def test_a_one_hour_write_gets_its_own_line_and_rate():
     usage = dict(
         USAGE,

@@ -29,6 +29,14 @@ const state = {
    duration), and a long streaming answer eats into the window. */
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
+/* The countdown's faces: green while the window is comfortable, amber in
+   the last minute, red and moving in the last thirty seconds, grey once it
+   is gone. Escalation by colour is the convention every countdown timer
+   uses, so the state registers before the number does - which is the whole
+   point: send the next message before this cache is lost. */
+const TTL_WARN_MS = 60 * 1000;
+const TTL_URGENT_MS = 30 * 1000;
+
 function cacheTouchOf(response) {
   const usage = (response && response.usage) || {};
   const read = usage.cache_read_input_tokens;
@@ -43,16 +51,27 @@ function cacheTouchOf(response) {
 function cacheAnchorOf(record) {
   const touch = cacheTouchOf(record.response);
   if (!touch) return null;
-  const end = Date.parse(record.timestamp);
-  if (Number.isNaN(end)) return null;
+  // momentOf, not Date.parse: a stored stamp can be llm's naive UTC form,
+  // which Date.parse would read as local time and move the anchor by the
+  // whole timezone offset.
+  const end = momentOf(record.timestamp);
+  if (!end) return null;
   const duration = typeof record.response.duration_ms === 'number'
     ? record.response.duration_ms : 0;
-  return { at: end - duration, kind: touch.kind, tokens: touch.tokens };
+  return { at: end.getTime() - duration, kind: touch.kind, tokens: touch.tokens };
 }
 
 function clock(ms) {
   const total = Math.max(0, Math.round(ms / 1000));
   return Math.floor(total / 60) + ':' + String(total % 60).padStart(2, '0');
+}
+
+/* How long ago something happened, small enough for a footer. clock() has
+   no unit above minutes, and a conversation reopened days later is not
+   carrying "4320:00" of information. */
+function ago(ms) {
+  if (ms >= 3600000) return Math.round(ms / 3600000) + 'h';
+  return clock(ms);
 }
 
 /* --- when a turn happened ---------------------------------------------------
@@ -91,8 +110,11 @@ function renderCacheStatus() {
   const noteEl = byId('cacheNote');
   // The bar gets the short state; the long explanation lives in the cost
   // popover's cacheNote slot, which only exists while the popover is built.
-  const say = (label, note) => {
+  // data-state drives the colour ladder, so the urgency is visible before
+  // any of this text is read.
+  const say = (label, note, face) => {
     stateEl.textContent = label;
+    stateEl.dataset.state = face || 'idle';
     if (noteEl) noteEl.textContent = note;
   };
   if (byId('cacheControl').value !== 'true') {
@@ -103,16 +125,29 @@ function renderCacheStatus() {
   const anchor = state.cache.anchor;
   if (anchor) {
     const remaining = anchor.at + CACHE_TTL_MS - Date.now();
-    if (remaining > 0) {
-      say('TTL ' + clock(remaining),
-        (anchor.kind === 'read' ? 'Read ' : 'Written ') + fmt(anchor.tokens)
-        + ' tok · expires in ' + clock(remaining)
-        + ' · the next hit refreshes the 5-minute TTL for free');
-    } else {
+    const face = remaining > TTL_WARN_MS ? 'live'
+      : remaining > TTL_URGENT_MS ? 'warn'
+        : remaining > 0 ? 'urgent' : 'expired';
+    if (face === 'expired') {
       say('cache expired',
-        'Expired ' + clock(-remaining)
-        + ' ago — the next turn writes a fresh cache at 1.25× the input price');
+        'Expired ' + ago(-remaining)
+        + ' ago — the next turn writes a fresh cache at 1.25× the input price',
+        face);
+      return;
     }
+    const touched = (anchor.kind === 'read' ? 'Read ' : 'Written ')
+      + fmt(anchor.tokens) + ' tok';
+    if (face === 'urgent') {
+      say('TTL ' + clock(remaining),
+        touched + ' · send now — after ' + clock(remaining)
+        + ' the prefix is written again at 1.25× the input price',
+        face);
+      return;
+    }
+    say('TTL ' + clock(remaining),
+      touched + ' · expires in ' + clock(remaining)
+      + ' · the next hit refreshes the 5-minute TTL for free',
+      face);
     return;
   }
   const input = state.cache.lastInput;

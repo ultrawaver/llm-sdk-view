@@ -154,7 +154,16 @@ def cost_breakdown(model: str | None, usage: dict | None) -> dict | None:
     if isinstance(cache_creation, dict):
         write_5m = _int(cache_creation.get("ephemeral_5m_input_tokens"))
         write_1h = _int(cache_creation.get("ephemeral_1h_input_tokens"))
-    if write_5m is None and creation_total is not None:
+    if creation_total is not None and (write_5m is not None or write_1h is not None):
+        # The split and the total must agree, and the API has been seen
+        # disagreeing with itself: a web-search turn reported a 0 + 0 split
+        # against a total of 8,940. The total is what the countdown shows,
+        # so the total wins and the split only carves out its 1h part -
+        # llm-anthropic only ever writes a 5-minute entry, so whatever the
+        # 1h detail does not claim is a 5m write.
+        write_1h = write_1h or 0
+        write_5m = max(creation_total - write_1h, 0)
+    elif write_5m is None and creation_total is not None:
         # No 5m/1h split, but llm-anthropic only ever writes a 5-minute
         # entry, so an unsplit write total is a 5m write.
         write_5m = creation_total

@@ -1215,7 +1215,58 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .cost-hit { color: var(--ok); }
 
-.cost-ttl { color: var(--warn); }
+/* The cache countdown is a status, not just a number: it wears the same
+   escalation ladder every countdown timer uses, so the colour says how
+   much of the window is left before the text is ever read. Green while
+   comfortable, amber in the last minute, red and moving in the last thirty
+   seconds, grey once the entry is gone. The quiet states get no badge. */
+.cost-ttl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: -4px;  /* the badge's own padding would push the tokens right */
+  color: var(--text-faint);
+}
+
+.cost-ttl::before {
+  content: "";
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.cost-ttl[data-state="live"] { color: var(--ok); background: var(--ok-bg); }
+.cost-ttl[data-state="warn"] { color: var(--warn); background: var(--warn-bg); }
+.cost-ttl[data-state="urgent"] {
+  color: var(--danger);
+  background: var(--danger-bg);
+  font-weight: 600;
+}
+.cost-ttl[data-state="expired"] { color: var(--fixed); background: var(--fixed-bg); }
+.cost-ttl[data-state="idle"] { padding: 0; margin-left: 0; }
+
+.cost-ttl[data-state="live"]::before,
+.cost-ttl[data-state="warn"]::before,
+.cost-ttl[data-state="urgent"]::before,
+.cost-ttl[data-state="expired"]::before { display: block; }
+
+/* The last thirty seconds move: a pulse is the cheapest honest urgency
+   there is. It dies entirely when the user asked the OS for no motion -
+   the red remains, so nothing is communicated only by animation. */
+@keyframes ttl-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.cost-ttl[data-state="urgent"] { animation: ttl-pulse 0.9s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cost-ttl[data-state="urgent"] { animation: none; }
+}
 
 .cost-spacer { flex: 1; }
 
