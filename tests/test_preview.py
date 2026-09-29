@@ -289,15 +289,27 @@ def test_an_empty_effort_is_the_default_not_a_level(client, fake_provider):
     assert "output_config" not in data["kwargs"]
 
 
-def test_a_greyed_effort_select_never_keeps_a_stale_level(static_page):
-    """The page resets the select when its options are replaced.
+def test_the_rebuild_is_handed_the_level_it_must_end_up_with(static_page):
+    """The level and the rebuild have to arrive together.
 
-    Browsers clear a select to '' when the selected option is removed, which
-    used to leak the previous model's level into the next request.
+    Replacing a select's options clears its selection, so a value written
+    before the rebuild is wiped by it. The page used to rely on that clearing
+    as the reset, and a reopened conversation was written first and rebuilt
+    after - which left it on "default" and had the composer report the
+    difference as a change the user had made. The stored level now goes to
+    the rebuild, which keeps it when this model still offers it.
+
+    This pins the wiring. The behaviour - a level the model cannot send is
+    never left selected, a level it can send is never dropped - is measured
+    in tests/test_conversation_state_in_a_browser.py, because a string in a
+    page cannot be asked what a select ends up holding.
     """
-    assert "if (!byId('effort').value || byId('effort').selectedOptions[0].disabled)" in (
-        static_page
-    )
+    flat = " ".join(static_page.split())
+    assert "function applyEffortState(chosen)" in flat
+    assert "applyEffortState(options.effort);" in flat
+    # Back to writing the select and rebuilding it afterwards would be the
+    # old shape again, whichever order the two lines were in.
+    assert "restore('effort'" not in flat
 
 
 # --- the page can only ever send what the form displays ------------------------

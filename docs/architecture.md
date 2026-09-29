@@ -119,13 +119,24 @@ Two display rules fall out of the honesty rules:
   picking it sends no effort field at all. Absence on the wire means the
   provider default applied - never that a value was lost (see
   `docs/per-turn-settings.md` §1b).
+- The effort value is decided where its list is rebuilt, never written onto
+  the control from somewhere else. Replacing a select's options clears its
+  selection, so a value written first and rebuilt after is a value lost, and
+  the composer would then report the loss as a change the user had made. The
+  rebuild keeps a level the new list still offers and thinking still allows,
+  and falls back to the provider's own level for one this model cannot send.
 
 History shows each turn's settings through the same honesty lens: a hover card
 per bubble read from the turn's stored `effective_options` (a turn with no
 sidecar row says "not recorded"), a dashed divider between turns whose stored
-settings differ, and a cache hint that fires only for fields inside the cache
-prefix (model, system, the web-search tool's shape) - `max_tokens`, `effort`
-and `thinking` are not part of the prefix and never warn.
+settings differ, and a composer hint naming what the next turn changes about
+the last one. The hint has two classes, because only one of them can cost
+something: a field inside the cache prefix (model, system, the web-search
+tool's shape) says the cached prefix will not be reused, while `max_tokens`,
+`effort`, `thinking` and `allowed_callers` are named as a difference and never
+as a cache miss. Reopening a conversation puts its own stored settings back on
+the form first, so the hint stays silent about differences the user did not
+cause.
 
 ## Control status
 

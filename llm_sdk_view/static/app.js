@@ -1701,10 +1701,14 @@ const OTHER_REQUEST_FIELDS = [
 function updateCacheWarn() {
   const el = byId('cacheWarn');
   const text = byId('cacheWarnText');
+  // Hiding is not enough: a sentence left behind in the node is a claim
+  // about this form that nothing has withdrawn, and reading the DOM then
+  // shows a warning the page is not making.
+  const hide = () => { el.hidden = true; text.textContent = ''; };
   const last = state.turns[state.turns.length - 1];
   const lastOptions = last && last.options;
   if (!lastOptions || !Object.keys(lastOptions).length) {
-    el.hidden = true;
+    hide();
     return;
   }
   if (byId('cacheControl').value !== 'true') {
@@ -1720,7 +1724,7 @@ function updateCacheWarn() {
   const prefixChanged = differs(CACHE_PREFIX_FIELDS);
   const otherChanged = differs(OTHER_REQUEST_FIELDS);
   if (!prefixChanged.length && !otherChanged.length) {
-    el.hidden = true;
+    hide();
     return;
   }
   // Only a prefix change can cost a cache hit, so only a prefix change says
@@ -1792,22 +1796,38 @@ function effortLabels() {
   return labels;
 }
 
-function applyEffortState() {
+/* The effort control, rebuilt from the loaded model's own capabilities.
+ *
+ * `chosen` is the level the control should end up holding; omitted, it keeps
+ * the level it is already showing. It is read before the list is replaced,
+ * because replacing a select's options clears its selection - a rebuild that
+ * discarded a value the new list still offers would silently change the
+ * request, and the composer's "differs from the last turn" warning would
+ * then blame the user for it. A level this model does not offer - a leftover
+ * from the previous one, or one thinking has since made illegal - falls back
+ * to the provider's own level rather than being sent. */
+function applyEffortState(chosen) {
   const control = state.data.controls.effort;
   const off = byId('thinking').value === 'off';
   const labels = effortLabels();
+  const select = byId('effort');
+  const wanted = chosen === undefined ? select.value : chosen;
   const options = control.options.map((option) => ({
     value: option.value,
     // A level Anthropic rejects with thinking off is not selectable.
     disabled: !state.caps.supports_effort || (off && option.blocked_without_thinking)
   }));
-  setOptions(byId('effort'), options, labels);
-  byId('effort').disabled = !state.caps.supports_effort;
-  // Replacing the options clears the selection to '' rather than picking
-  // the first one, so a level left over from the previous model could be
-  // sent for a model that has no effort parameter at all.
-  if (!byId('effort').value || byId('effort').selectedOptions[0].disabled) {
-    byId('effort').value = 'default';
+  setOptions(select, options, labels);
+  select.disabled = !state.caps.supports_effort;
+  const kept = Array.from(select.options)
+    .find((option) => option.value === wanted && !option.disabled);
+  select.value = kept ? wanted : 'default';
+  // Replacing the options clears the value to '' rather than picking the
+  // first one. "default" is the provider's own level and thinking never
+  // blocks it, so this is only a guard against a future model that does.
+  if (!select.value || (select.selectedOptions[0] && select.selectedOptions[0].disabled)) {
+    const first = Array.from(select.options).find((option) => !option.disabled);
+    if (first) select.value = first.value;
   }
   byId('effortNote').innerHTML = whyMark(control.status, state.caps.supports_effort
     ? 'sent as output_config.effort'
@@ -2136,7 +2156,10 @@ function apply(data) {
   byId('thinking').disabled = thinkingControl.status !== 'Editable';
   setNote('thinkingNote', thinkingControl.status, thinkingControl.note);
 
-  applyEffortState();
+  // A model change starts at the provider's own level: the effort another
+  // model was given is not carried onto one that tunes differently. A
+  // conversation reopening is the path that restores its own.
+  applyEffortState('default');
   applyThinkingState();
 
   const typeControl = data.controls.web_search_type;
@@ -2506,7 +2529,6 @@ function applyStoredOptions(options) {
     if (known) select.value = String(value);
   };
   restore('thinking', options.thinking);
-  restore('effort', options.effort);
   restore('webSearchType', options.web_search_type);
   restore('allowedCallers', options.allowed_callers);
   restore('responseInclusion', options.response_inclusion);
@@ -2525,8 +2547,15 @@ function applyStoredOptions(options) {
     byId('cacheControl').value = options.cache_control ? 'true' : 'false';
   }
 
-  applyEffortState();
   applyThinkingState();
+  // Effort is not written above like the others: its option list is rebuilt
+  // from the restored thinking, and a rebuild that ran after a plain write
+  // would wipe it. That wipe left a reopened conversation on "default" and
+  // then had the composer report the stored level as a change the user had
+  // made. The stored level goes to the rebuild instead, which keeps it when
+  // this model still offers it and falls back to the provider's own level
+  // when it does not.
+  applyEffortState(options.effort);
   refresh();
 }
 

@@ -611,3 +611,45 @@ visible on one screen at the same time.
 - The menu mounts in the top-level overlay layer rather than inside the sidebar's
   scroller - the rule the topbar pills had already paid for.
 
+### Fixed: a reopened conversation reported a change nobody had made
+
+Switching back to an old conversation showed `effort differ from the last turn`
+above the composer and `High` in the effort pill, for a conversation that had
+been sent at `xhigh` thirteen turns running. The user had changed nothing.
+
+- `applyStoredOptions()` ended by calling `applyEffortState()`, which rebuilds
+  the effort `<option>` list from the model's capabilities. Replacing a
+  select's options clears its selection, and the guard that followed turned a
+  cleared value into `default` - so the level `applyStoredOptions()` had just
+  restored was wiped by the next line, and `updateCacheWarn()` then compared
+  that `default` against the turn's stored `xhigh` and reported the difference
+  as the user's own doing. The restore had been written before the rebuild and
+  destroyed by it.
+- The rebuild now owns the decision. `applyEffortState(chosen)` reads the level
+  the control must end up holding *before* the list is replaced, keeps it when
+  the rebuilt list still offers it and thinking still allows it, and falls back
+  to the provider's own level when it does not - which is the single case the
+  old blanket clearing was ever there for. `apply()` asks for `default`
+  explicitly, so changing the model still starts at the provider's own level;
+  the restore path hands the rebuild its stored level instead of writing the
+  select first.
+- The same clearing was dropping a legal level whenever the thinking mode
+  changed: `high` with thinking off was reset to `default` even though nothing
+  about thinking makes `high` unsendable.
+- `updateCacheWarn()` now clears its sentence when it hides itself. A hidden
+  node still holding a withdrawn claim about the current form reads as a live
+  warning to anything that inspects the DOM, which is exactly how the stale
+  text announced itself.
+- The test that should have caught this asserted `restored["effort"]`, which
+  `'default'` satisfies - and it ran on a page whose model was Haiku, whose
+  only effort level *is* `default`, so it had nothing to lose in the first
+  place. It now asserts the restored level by value on a model that has levels,
+  and two browser checks were added: the reported symptom (a conversation that
+  used `xhigh` reopens with the control holding it, the warning hidden and
+  empty) and the rebuild invariant (a level the new list still offers survives;
+  one this model cannot send does not). All three fail against the previous
+  implementation. The string assertion that pinned the old guard's literal text
+  - a page cannot be asked what a select ends up holding - is replaced by one
+  that pins the wiring, with the behaviour measured in the browser.
+
+

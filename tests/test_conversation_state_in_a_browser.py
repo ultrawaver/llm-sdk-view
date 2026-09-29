@@ -23,20 +23,25 @@ def test_a_conversation_reopens_with_its_own_settings(page):
 
     The old code restored one field - `model`, and from the *first* turn.
     Everything else stayed at the selected model's defaults.
+
+    The effort level is asserted by value, never by truthiness. This test
+    used to ask only whether the control held *something*, and `'default'`
+    is something - which is how a restore that was wiped dry passed as a
+    restore that worked.
     """
-    restored = page.evaluate(
+    outcome = page.evaluate(
         """async () => {
-            // Values this model really offers, so restoring them is legal.
-            const pick = (id) => {
-                const options = Array.from(byId(id).options).map((o) => o.value);
-                return options.find((v) => v !== byId(id).value) || options[0];
-            };
+            // A model that has effort levels to restore at all: the page
+            // starts on Haiku, whose only level is 'default', so the old
+            // version of this test had nothing to lose in the first place.
+            byId('model').value = 'claude-fable-5-1';
+            await loadForm();
             const stored = {
                 system: 'Answer in one sentence.',
                 max_tokens: 4096,
                 web_search: false,
-                thinking: pick('thinking'),
-                effort: pick('effort'),
+                thinking: 'on',
+                effort: 'xhigh',
             };
             await loadForm();                 // model defaults first
             applyStoredOptions(stored);       // then the conversation's own
@@ -49,11 +54,103 @@ def test_a_conversation_reopens_with_its_own_settings(page):
             };
         }"""
     )
-    assert restored["system"] == "Answer in one sentence."
-    assert restored["maxTokens"] == "4096"
-    assert restored["webSearch"] == "false"
-    assert restored["thinking"]
-    assert restored["effort"]
+    assert outcome["system"] == "Answer in one sentence."
+    assert outcome["maxTokens"] == "4096"
+    assert outcome["webSearch"] == "false"
+    assert outcome["thinking"] == "on"
+    assert outcome["effort"] == "xhigh", "the stored level, not 'default'"
+
+
+def test_reopening_a_conversation_does_not_report_a_change_nobody_made(page):
+    """The complaint, measured: switching back to an old conversation showed
+    "effort differ from the last turn" for a change the user never made.
+
+    `applyStoredOptions()` ended by rebuilding the effort list, and replacing
+    a select's options clears its selection - so the level it had just
+    restored was wiped to "default" and the composer then reported that
+    difference as if the user had caused it.
+    """
+    outcome = page.evaluate(
+        """async () => {
+            byId('model').value = 'claude-fable-5-1';
+            await loadForm();
+            const stored = Object.assign(currentFormOptions(), {
+                system: 'the system prompt this conversation used',
+                max_tokens: 64000,
+                effort: 'xhigh',
+            });
+            // What openConversation() does, in its own order.
+            state.turns = [{ options: stored }];
+            await loadForm();
+            applyStoredOptions(stored);
+            updateCacheWarn();
+            return {
+                effort: byId('effort').value,
+                system: byId('system').value,
+                maxTokens: byId('maxTokens').value,
+                warned: !byId('cacheWarn').hidden,
+                warnText: byId('cacheWarnText').textContent,
+            };
+        }"""
+    )
+    assert outcome["effort"] == "xhigh"
+    assert outcome["system"] == "the system prompt this conversation used"
+    assert outcome["maxTokens"] == "64000"
+    assert outcome["warned"] is False, outcome["warnText"]
+    assert outcome["warnText"] == "", "a withdrawn warning must not linger"
+
+
+def test_a_rebuilt_effort_list_keeps_a_level_it_still_offers(page):
+    """A rebuild is not a reset.
+
+    The effort list is rebuilt from the model's capabilities whenever the
+    form reloads or the thinking mode changes, and a rebuild clears the
+    selection. A level the new list still offers belongs to the user; only
+    one that cannot be sent falls back to the provider's own level.
+    """
+    outcome = page.evaluate(
+        """async () => {
+            byId('model').value = 'claude-fable-5-1';
+            await loadForm();
+            const set = (value) => { byId('effort').value = value; };
+
+            set('max');
+            applyEffortState();                 // rebuild, nothing asked
+            const kept = byId('effort').value;
+
+            // This model rejects every explicit level with thinking off, so
+            // none of them may survive it.
+            byId('thinking').value = 'off';
+            applyEffortState();
+            const blocked = byId('effort').value;
+
+            byId('thinking').value = 'on';
+            set('high');
+            applyEffortState();
+            const legal = byId('effort').value;
+
+            set('default');
+            applyEffortState('xhigh');          // asked for, and offered
+            const asked = byId('effort').value;
+
+            // A model with no effort parameter at all must not be handed a
+            // level it cannot send.
+            byId('model').value = 'claude-haiku-4-5-20251001';
+            await loadForm();
+            applyEffortState('xhigh');
+            return {
+                kept, blocked, legal, asked,
+                unsupported: byId('effort').value,
+                disabled: byId('effort').disabled,
+            };
+        }"""
+    )
+    assert outcome["kept"] == "max", "a still-offered level is the user's"
+    assert outcome["blocked"] == "default", "an unsendable level is refused"
+    assert outcome["legal"] == "high"
+    assert outcome["asked"] == "xhigh"
+    assert outcome["unsupported"] == "default"
+    assert outcome["disabled"] is True, "Haiku has no effort parameter"
 
 
 def test_a_value_the_model_no_longer_offers_is_not_written(page):
