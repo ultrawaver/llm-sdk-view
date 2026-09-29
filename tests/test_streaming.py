@@ -69,6 +69,42 @@ def test_the_turn_yields_each_chunk(make_session):
     assert events[-1]["text"] == "Hello world"
 
 
+def test_reasoning_streams_as_its_own_event(make_session, response_scenario):
+    """Thinking deltas reach the page as reasoning, never mixed into text."""
+    response_scenario(
+        {
+            "id": "msg_think",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-5",
+            "content": [
+                {"type": "thinking", "thinking": "let me think about this"},
+                {"type": "text", "text": "Hello world"},
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 8},
+        }
+    )
+    events = list(make_session().stream_turn("Hello"))
+
+    reasoning = [e["text"] for e in events if e["type"] == "reasoning"]
+    assert reasoning == ["let me think about this"]
+    # Reasoning is its own channel: text events stay pure answer text.
+    assert [e["text"] for e in events if e["type"] == "text"] == ["Hello", " world"]
+    # The closing event carries the finished Message's thinking, so the
+    # strip can be re-rendered from the record rather than from fragments.
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["thinking"] == "let me think about this"
+
+
+def test_a_turn_without_thinking_sends_no_reasoning(make_session):
+    events = list(make_session().stream_turn("Hello"))
+
+    assert [e for e in events if e["type"] == "reasoning"] == []
+    assert events[-1]["thinking"] is None
+
+
 def test_the_final_message_is_what_the_UI_shows_and_keeps(make_session):
     """Display and persistence come from the finished Message, not fragments."""
     chat = make_session()

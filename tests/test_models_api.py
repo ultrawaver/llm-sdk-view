@@ -150,11 +150,67 @@ def test_no_key_means_fallback_and_no_network(isolated_cache, record):
 def test_the_form_still_works_without_any_model_api(isolated_cache):
     data = TestClient(app).get("/api/form").json()
 
-    assert data["models"] == list(FOUR_MODELS)
+    # One model per series, whatever order they land in: offline the profile
+    # is the whole world and every entry is the head of its own series.
+    assert set(data["models"]) == set(FOUR_MODELS)
     assert data["model_data"]["source"] == "fallback"
     assert data["model_data"]["profile_version"] == "2026-09-26"
     # The default model is Claude Haiku 4.5, so the fallback window is 200k.
     assert data["capabilities"]["context_window"] == 200_000
+
+
+def test_the_list_opens_on_the_newest_member_of_each_series(
+    isolated_cache, record, with_key
+):
+    """A release must supersede its series without anyone editing anything.
+
+    The five extra models below are members of series already listed. None of
+    them may appear, and the newer member must win even though the API sent it
+    later in the payload: ordering here is what makes a new release visible.
+    """
+    record(
+        data=API_DATA
+        + [
+            _entry("claude-sonnet-5-5", 1_000_000, 128_000,
+                   effort={"supported": True, "high": True},
+                   thinking={"supported": True, "types": ["adaptive"]}),
+            _entry("claude-sonnet-4-6", 1_000_000, 64_000),
+            _entry("claude-opus-4-6", 1_000_000, 64_000),
+            _entry("claude-fable-5", 1_000_000, 64_000),
+            _entry("claude-haiku-4-5", 200_000, 64_000),
+        ]
+    )
+    model_api.refresh()
+    capabilities.reset_model_data()
+
+    offered = capabilities.model_ids()
+
+    assert "claude-sonnet-5-5" in offered
+    assert "claude-sonnet-5" not in offered, "superseded by the same series' 5.5"
+    assert "claude-sonnet-4-6" not in offered
+    assert "claude-opus-4-6" not in offered
+    assert "claude-fable-5" not in offered
+    # The haiku already listed is the dated snapshot; an undated haiku 4.5 is
+    # the same model and must not add a second row.
+    assert len([m for m in offered if m.startswith("claude-haiku")]) == 1
+    assert offered[0] == "claude-sonnet-5-5", "the newest model opens the list"
+
+
+def test_superseded_models_are_reported_rather_than_silently_dropped(
+    isolated_cache, record, with_key
+):
+    """Nine models leaving the list must be said somewhere, or it reads as
+    data loss rather than as a rule."""
+    record()
+    model_api.refresh()
+    capabilities.reset_model_data()
+
+    catalog = capabilities.model_catalog()
+
+    assert set(catalog["models"]) == set(FOUR_MODELS)
+    assert catalog["superseded"] == [] or all(
+        "kept_by" in item for item in catalog["superseded"]
+    )
 
 
 def test_a_fallback_is_never_labelled_as_the_api(isolated_cache):

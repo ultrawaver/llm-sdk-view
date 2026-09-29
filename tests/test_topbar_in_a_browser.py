@@ -18,29 +18,12 @@ No key and no network: the page runs against the same isolated application
 the rest of the suite builds, and the browser only ever loads localhost.
 """
 
-import os
-import socket
-import threading
-import time
-
 import pytest
-import uvicorn
 
-from llm_sdk_view.app import create_app
+# The browser, the live application and the page itself are fixtures on the
+# suite's conftest, shared with test_chat_reading_in_a_browser.py.
 
 pytestmark = pytest.mark.browser
-
-
-def _no_browser(reason: str):
-    """Skip, unless the caller said a skip is not an acceptable answer.
-
-    CI sets ``LLM_SDK_VIEW_REQUIRE_BROWSER``: a check that quietly skips is
-    a check that is not running, and a suite that stays green while these
-    never execute is precisely how the defect they exist for shipped.
-    """
-    if os.environ.get("LLM_SDK_VIEW_REQUIRE_BROWSER"):
-        pytest.fail(f"LLM_SDK_VIEW_REQUIRE_BROWSER is set but {reason}")
-    pytest.skip(reason)
 
 # The pills that open a menu, and the heading each menu carries. Streaming
 # and (on a model without the parameter) Effort open nothing by design.
@@ -51,84 +34,6 @@ MENU_PILLS = {
     "webSearch": "Web search",
     "cacheControl": "Prompt caching",
 }
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _launch(playwright):
-    """Whatever chromium this machine has: the bundled one, or Chrome."""
-    problems = []
-    for options in ({}, {"channel": "chrome"}):
-        try:
-            return playwright.chromium.launch(headless=True, **options)
-        except Exception as exc:  # noqa: BLE001 - the reason is reported, not handled
-            name = options.get("channel", "bundled chromium")
-            problems.append(f"{name}: {str(exc).splitlines()[0]}")
-    _no_browser(
-        "there is no browser to drive (" + "; ".join(problems) + "). Install "
-        "one with `playwright install chromium`, or install Google Chrome."
-    )
-
-
-@pytest.fixture(scope="session")
-def browser():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        _no_browser(
-            "playwright is not installed. The browser checks need the "
-            "optional extra: pip install -e '.[test,browser]'"
-        )
-    with sync_playwright() as playwright:
-        launched = _launch(playwright)
-        try:
-            yield launched
-        finally:
-            launched.close()
-
-
-@pytest.fixture
-def live_app():
-    """The real application on a real port.
-
-    In-process and function-scoped, so the suite's isolation fixtures still
-    apply: no API key, a throwaway cache directory, a throwaway database and
-    a token counter that refuses. The page falls back to the versioned model
-    profile, which is what a machine with no key sees anyway.
-    """
-    port = _free_port()
-    server = uvicorn.Server(
-        uvicorn.Config(create_app(), host="127.0.0.1", port=port, log_level="warning")
-    )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 30
-    while not server.started:
-        if time.monotonic() > deadline or not thread.is_alive():
-            raise RuntimeError("the application did not start")
-        time.sleep(0.02)
-    try:
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        thread.join(timeout=15)
-
-
-@pytest.fixture
-def page(browser, live_app):
-    context = browser.new_context(viewport={"width": 1500, "height": 820})
-    opened = context.new_page()
-    opened.goto(live_app)
-    # The pills render once the form and the capabilities have arrived.
-    opened.wait_for_selector('#settingsPills [data-pill="model"]')
-    try:
-        yield opened
-    finally:
-        context.close()
 
 
 def is_painted_at_its_own_rect(page, selector: str) -> bool:

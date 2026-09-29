@@ -1,15 +1,20 @@
 # Upstream contributions
 
-Verified against `llm==0.36` and `llm-anthropic==0.29` on 2026-09-26, by reading
+Verified against `llm==0.36` and `llm-anthropic==0.30` on 2026-09-29, by reading
 the installed plugin source rather than documentation.
+
+The installed plugin is not the PyPI release: it is the fork branch below, built
+from source, so it carries `response_inclusion` while stock 0.30 does not. CI
+installs plain `llm-anthropic` from PyPI, so CI exercises the same three of four
+behaviours a machine without the branch sees.
 
 ## Status of the four required Anthropic behaviours
 
-| # | Behaviour | Status in `llm-anthropic` 0.29 |
+| # | Behaviour | Status in `llm-anthropic` 0.30 (stock) |
 |---|---|---|
 | 1 | `web_search_20260318` | Already correct. `WebSearch.tool_spec()` emits it when the model has `supports_adaptive_thinking`, which `claude-sonnet-5` does. |
 | 2 | Dynamic filtering | Already correct. `tool_spec()` never sends `allowed_callers`, so direct-only calling is never forced. |
-| 3 | `response_inclusion="excluded"` | **Missing.** Not in `WebSearch.__init__` and not in `tool_spec()`. |
+| 3 | `response_inclusion="excluded"` | **Missing.** Stock 0.30 contains neither `response_inclusion` nor `allowed_callers`; only the fork branch supplies it. |
 | 4 | Prompt caching | Already correct. `options.cache` puts `cache_control={"type": "ephemeral"}` on the last block of the final message. |
 
 Only one of the four needs an upstream change.
@@ -55,7 +60,19 @@ The patch above was published as a pull request on 2026-09-26:
 - upstream PR: <https://github.com/simonw/llm-anthropic/pull/95> (open)
 - fork: <https://github.com/ultrawaver/llm-anthropic>
 - branch: `web-search-response-inclusion`
-- commit: `1fe612526d89b1f381a6e480a3d32e05614103dd`
+- commit: `a3ce43acf9c00a5b5df750e57d544eeaf3e18c00`
+
+The branch tracks upstream releases by rebasing, never by merging: upstream's
+`0.30` tag arrived on 2026-09-29 and the single patch commit was replayed onto
+it (a clean replay - upstream had not touched `WebSearch` itself). The previous
+tip is preserved locally as `backup/pre-0.30-rebase` (`1fe6125`). Rebasing keeps
+the commit's parent honest, so the diff Simon reviews stays one commit; repeated
+merges instead would pile branch noise into the PR.
+
+Upgrading the dependency must reinstall from this branch, never
+`pip install -U llm-anthropic`: the PyPI release would silently replace the
+build and drop `response_inclusion`, leaving this project back at three of four
+behaviours with no error anywhere.
 
 This repository does not copy that code; when the branch's commit is installed
 the project starts emitting `response_inclusion` with no source change of its

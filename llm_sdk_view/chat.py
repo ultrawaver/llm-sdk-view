@@ -40,7 +40,7 @@ from .capabilities import (
     ModelCapabilities,
     capabilities_for,
     fallback_models,
-    model_ids,
+    model_catalog,
     plugin_transport,
     profile,
     provenance,
@@ -653,8 +653,14 @@ def form_schema(model_id: str) -> dict:
     defaults = ChatOptions(model=model_id)
     thinking = capabilities.thinking_default
     fallback = profile()
+    catalog = model_catalog()
     return {
-        "models": list(model_ids()),
+        "models": catalog["models"],
+        # What the narrowing left out. Hidden models are still listed here so
+        # the page can say so: a short list that silently dropped nine models
+        # would read like lost data rather than like a rule.
+        "superseded": catalog["superseded"],
+        "series_rule": catalog["rule"],
         "default_model": DEFAULT_MODEL,
         # Where the numbers on this page came from: the Models API when it
         # answered, the labelled fallback profile when it did not.
@@ -1101,7 +1107,9 @@ class ChatSession:
         """Yield events: the prepared request, then text, then the final text.
 
         There is no buffered mode. ``llm-anthropic`` always opens a stream, so
-        the chunks it produces are the only honest thing to show.
+        the chunks it produces are the only honest thing to show. Reasoning
+        chunks travel as their own event type: the chat presents them in a
+        collapsible thinking strip rather than mixing them into the answer.
         """
         prepared = self.prepare(text)
         self._require_key()
@@ -1124,17 +1132,26 @@ class ChatSession:
                 if ttft_ms is None:
                     ttft_ms = int((time.monotonic() - started) * 1000)
                 yield {"type": "text", "text": event.chunk}
+            elif event.type == "reasoning" and event.chunk:
+                # Signature and redacted markers arrive as empty reasoning
+                # chunks; only text is worth an event.
+                yield {"type": "reasoning", "text": event.chunk}
         self._record_usage(prepared.response)
         # Only now does a turn exist: before the stream ends there is no
         # complete Message, so there is nothing to look at or to store.
         self.last_response = prepared.response
+        record = self.record(text, prepared, ttft_ms=ttft_ms)
         yield {
             "type": "record",
-            "record": self.record(text, prepared, ttft_ms=ttft_ms).as_dict(),
+            "record": record.as_dict(),
         }
         yield {
             "type": "done",
             "text": final_message_text(prepared.response),
+            # The record's own reading of the finished Message, so the
+            # streamed reasoning preview and the stored thinking can never
+            # disagree about what the model said.
+            "thinking": record.response.thinking,
             "context": self.context().as_dict(),
         }
 

@@ -28,13 +28,14 @@ import json
 import sys
 import time
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
 import llm
 
 from . import model_api
+from .model_series import newest_per_series, series_for, series_label, strip_snapshot
 
 MODELS_JSON = Path(__file__).parent / "models.json"
 
@@ -134,6 +135,7 @@ class ModelCapabilities:
     min_cacheable_tokens_source: str = ""
     data_source: str = ""
     verified: str = ""
+    thinking_mode_source: str = ""
 
     def effort_options(self) -> tuple[str, ...]:
         """Effort levels the form offers. There is no "off": that is thinking."""
@@ -173,6 +175,7 @@ class ModelCapabilities:
             "max_output_tokens": self.max_output_tokens,
             "max_output_source": self.max_output_source,
             "thinking_mode": self.thinking_mode,
+            "thinking_mode_source": self.thinking_mode_source,
             "thinking_default": self.thinking_default,
             "thinking_always_on": self.thinking_always_on,
             "thinking_editable": self.thinking_editable,
@@ -245,6 +248,9 @@ def refresh_model_data() -> dict:
 def reset_model_data() -> None:
     """Forget the in-process snapshot so the next read re-reads the disk."""
     _api_models_cached.cache_clear()
+    # The profile behind the resolvability cache lives on disk too, so it has
+    # to go as well or a replacement profile keeps answering with stale ids.
+    _resolvable_llm_id.cache_clear()
     _snapshot_state[0] = time.monotonic()
 
 
@@ -255,25 +261,111 @@ def _api_entry(model_id: str) -> dict | None:
     return None
 
 
-def model_ids() -> tuple[str, ...]:
-    """The model dropdown: the Models API list, curated models first.
+@cache
+def _resolvable_llm_id(model_id: str) -> str | None:
+    """The id ``llm.get_model()`` accepts for this model, or None.
 
-    Only models the installed plugin can actually resolve are offered, so the
-    form never lists a model this project cannot send a request to. With no
-    Models API data the versioned fallback profile is used instead.
+    Nothing here guesses. The plugin registers some models bare, some under
+    the ``anthropic/`` prefix, and pinned snapshots only under their dated
+    id, so each plausible spelling is tried in order and an id that none of
+    them resolves is reported as unusable rather than assumed usable.
     """
-    curated = fallback_models()
-    if not api_models():
-        return curated
-    known = {_api_model_id(model_id): model_id for model_id in curated}
-    discovered = []
-    for entry in api_models():
-        form_id = known.get(entry.get("id"))
-        if form_id and form_id not in discovered:
-            discovered.append(form_id)
-    return tuple(discovered) + tuple(
-        model_id for model_id in curated if model_id not in discovered
+    entry = profile()["models"].get(model_id)
+    attempts = ([entry["llm_id"]] if entry else []) + list(_llm_id_variants(model_id))
+    for candidate in attempts:
+        try:
+            llm.get_model(candidate)
+        except Exception:  # noqa: BLE001 - UnknownModelError, KeyError, whatever
+            continue
+        return candidate
+    return None
+
+
+def _llm_id_variants(model_id: str) -> tuple[str, ...]:
+    """Every spelling worth trying: the id, its undated form, both prefixed."""
+    variants: list[str] = []
+    for bare in (model_id, strip_snapshot(model_id)):
+        for spelling in (bare, f"anthropic/{bare}"):
+            if spelling not in variants:
+                variants.append(spelling)
+    return tuple(variants)
+
+
+def _form_ids_by_api_id() -> dict[str, str]:
+    """Map Models API ids back onto the ids this project shows."""
+    mapping = {}
+    for form_id in profile()["models"]:
+        mapping.setdefault(_api_model_id(form_id), form_id)
+    return mapping
+
+
+def _candidates() -> tuple[tuple[str, str], ...]:
+    """Every model that could appear, paired with what the API said its age is.
+
+    Two gates, in this order: the Models API decides what exists, and the
+    installed plugin decides what this project can actually send. With no
+    Models API data the versioned profile stands in, labelled as the
+    fallback it is.
+    """
+    entries = api_models()
+    if not entries:
+        return tuple((model_id, "") for model_id in fallback_models())
+    known = _form_ids_by_api_id()
+    found: list[tuple[str, str]] = []
+    for entry in entries:
+        api_id = entry.get("id")
+        if not isinstance(api_id, str):
+            continue
+        form_id = known.get(api_id, api_id)
+        if _resolvable_llm_id(form_id) is None:
+            continue
+        found.append((form_id, entry.get("created_at") or ""))
+    return tuple(found)
+
+
+def model_ids() -> tuple[str, ...]:
+    """The model dropdown: the newest member of each series, newest first.
+
+    A series is kept whole rather than listed out, because the point of the
+    list is to be maintained by nobody: when Anthropic ships Sonnet 5.5 it
+    supersedes Sonnet 5 in the next Models API read, with no entry to add
+    and no version to bump. What the narrowing leaves out is reported by
+    :func:`model_catalog` rather than silently forgotten.
+    """
+    candidates = _candidates()
+    created = dict(candidates)
+    return newest_per_series(
+        (model_id for model_id, _ in candidates),
+        created_at=created.get,
     )
+
+
+def model_catalog() -> dict:
+    """The dropdown and what it narrowed away, in one read."""
+    candidates = _candidates()
+    visible = model_ids()
+    hidden = tuple(form_id for form_id, _ in candidates if form_id not in visible)
+    return {
+        "models": list(visible),
+        "superseded": [
+            {
+                "id": model_id,
+                "series": series_label(model_id),
+                "kept_by": _superseded_by(model_id, visible),
+            }
+            for model_id in hidden
+        ],
+        "rule": (
+            "one model per series: the highest version, ties broken by "
+            "created_at"
+        ),
+    }
+
+
+def _superseded_by(model_id: str, visible: tuple[str, ...]) -> str | None:
+    """The visible model in whose series this one sits, if there is one."""
+    key = series_for(model_id).key
+    return next((shown for shown in visible if series_for(shown).key == key), None)
 
 
 def _api_model_id(model_id: str) -> str:
@@ -282,9 +374,12 @@ def _api_model_id(model_id: str) -> str:
 
 
 def resolve_model_id(model_id: str) -> str:
-    """Map a form model id onto the id ``llm.get_model()`` resolves."""
-    entry = profile()["models"].get(model_id)
-    return entry["llm_id"] if entry else model_id
+    """Map a form model id onto the id ``llm.get_model()`` resolves.
+
+    A model the profile has never heard of resolves through its own id, so a
+    release needs no entry here to be sendable.
+    """
+    return _resolvable_llm_id(model_id) or model_id
 
 
 def _supported(value: Any) -> bool:
@@ -306,6 +401,15 @@ def _effort_levels_from_api(entry: dict, fallback: tuple[str, ...]) -> tuple[str
         return fallback
     levels = tuple(level for level in EFFORT_ORDER if _supported(effort.get(level)))
     return levels or fallback
+
+
+def _plugin_thinking_mode(model) -> str | None:
+    """What the plugin's own registration says this model's thinking is."""
+    if getattr(model, "supports_adaptive_thinking", False):
+        return "adaptive"
+    if getattr(model, "supports_thinking", False):
+        return "extended"
+    return None
 
 
 def _thinking_mode_from_api(entry: dict, fallback: str) -> str:
@@ -409,34 +513,53 @@ def _effective_caller(web_search_type: str | None) -> tuple[str | None, str]:
 
 
 def capabilities_for(model_id: str) -> ModelCapabilities:
-    """Everything the form and the request builder need about one model."""
+    """Everything the form and the request builder need about one model.
+
+    A model newer than ``models.json`` has no fallback entry, and that must
+    not be an error: the Models API and the installed plugin can still supply
+    nearly every fact. What neither of them reports stays ``None`` and reaches
+    the page as a provider default, never as a value borrowed from a model
+    that happens to sit next to it in the same file.
+    """
     data = profile()
-    entry = data["models"].get(model_id)
-    if entry is None:
-        raise ValueError(f"unknown model: {model_id}")
-    model = llm.get_model(entry["llm_id"])
+    entry = data["models"].get(model_id) or {}
+    llm_id = _resolvable_llm_id(model_id)
+    if llm_id is None:
+        raise ValueError(f"llm cannot resolve model: {model_id}")
+    model = llm.get_model(llm_id)
     tool_caps = _plugin_tool_capabilities(model)
     web_search_type = _web_search_type(model)
-    api = _api_entry(model_id) or {}
+    # A profile entry maps the form id onto the id llm resolves, so the API
+    # entry for a model the profile never heard of is looked up by either.
+    api = _api_entry(model_id) or _api_entry(llm_id.split("/", 1)[-1]) or {}
 
     # Context window and output ceiling: the Models API wins when it answers.
     if api.get("max_input_tokens") is not None:
         context_window = api["max_input_tokens"]
         context_source = "Anthropic Models API max_input_tokens"
-    else:
+    elif "context_window" in entry:
         context_window = entry["context_window"]
         context_source = (
             f"fallback profile {data['profile_version']} "
             f"(context window is not available offline)"
         )
+    else:
+        context_window = None
+        context_source = "unknown: no source reports this model's context window"
+
     if api.get("max_tokens") is not None:
         max_output = api["max_tokens"]
         max_output_source = "Anthropic Models API max_tokens"
     else:
-        max_output = getattr(model, "default_max_tokens", None) or entry["max_output_tokens"]
+        plugin_output = getattr(model, "default_max_tokens", None)
+        max_output = plugin_output or entry.get("max_output_tokens")
         max_output_source = (
             "llm-anthropic default_max_tokens, cross-checked against the "
             f"fallback profile {data['profile_version']}"
+            if plugin_output and "max_output_tokens" in entry
+            else "llm-anthropic default_max_tokens"
+            if plugin_output
+            else "unknown: no source reports this model's output ceiling"
         )
 
     # Effort and thinking: capabilities from the API, narrow rules from the
@@ -448,7 +571,17 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
     if api_effort and "supported" in api_effort:
         supports_effort = bool(api_effort["supported"]) and bool(effort_levels)
 
-    thinking_mode = _thinking_mode_from_api(api, entry["thinking_mode"])
+    # Thinking mode when the Models API says nothing: ask the plugin, which
+    # knows from its own registration, and say so rather than assume adaptive.
+    thinking_mode = _thinking_mode_from_api(
+        api, entry.get("thinking_mode") or _plugin_thinking_mode(model) or "unknown"
+    )
+    thinking_mode_source = (
+        "Anthropic Models API capabilities.thinking"
+        if (api.get("capabilities") or {}).get("thinking")
+        else entry.get("thinking_mode") and f"fallback profile {data['profile_version']}"
+        or "llm-anthropic registration"
+    )
     always_thinks = bool(getattr(model, "always_thinks", False))
     supports_thinking = bool(getattr(model, "supports_thinking", False))
     can_disable = supports_thinking and not always_thinks
@@ -470,13 +603,14 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
 
     return ModelCapabilities(
         id=model_id,
-        llm_id=entry["llm_id"],
+        llm_id=llm_id,
         api_model_id=model.claude_model_id,
         context_window=context_window,
         context_window_source=context_source,
         max_output_tokens=max_output,
         max_output_source=max_output_source,
         thinking_mode=thinking_mode,
+        thinking_mode_source=thinking_mode_source,
         thinking_default=THINKING_ON if always_thinks
         or bool(getattr(model, "thinks_by_default", False)) else THINKING_OFF,
         thinking_always_on=always_thinks,
@@ -488,7 +622,10 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
         budget_tokens_editable=tool_caps["budget_tokens"],
         supports_effort=supports_effort,
         effort_levels=effort_levels,
-        default_effort=entry["default_effort"],
+        # Not exposed by any source: the request leaves the field out and the
+        # model's own default applies, which the form shows as provider
+        # default rather than guessing it from a neighbouring model.
+        default_effort=entry.get("default_effort"),
         supports_web_search=bool(getattr(model, "supports_web_search", False)),
         web_search_type=web_search_type,
         plugin_response_inclusion=tool_caps["response_inclusion"],

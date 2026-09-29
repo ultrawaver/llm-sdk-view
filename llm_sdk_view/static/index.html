@@ -52,6 +52,10 @@
         <div id="log">
           <div id="messages"></div>
         </div>
+        <!-- Shown when the user scrolled up and new content arrived: the
+             stream never drags their reading place away, it offers the way
+             back. Not inside #log - a scroller clips its descendants. -->
+        <button id="jumpPill" hidden>↓ New messages</button>
 
         <!-- Value store, never shown: the topbar pills and their menus write
              back into these controls and fire their change events, so the

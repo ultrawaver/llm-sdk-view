@@ -99,7 +99,7 @@ EXPECTED = {
 
 
 def test_matrix_lists_exactly_the_four_form_models():
-    assert tuple(model_ids()) == FOUR_MODELS
+    assert set(model_ids()) == set(FOUR_MODELS)
 
 
 def test_fallback_profile_is_versioned_and_labelled():
@@ -450,14 +450,28 @@ def test_form_endpoint_describes_every_model(model_id):
 def test_form_endpoint_lists_the_models():
     data = TestClient(app).get("/api/form").json()
 
-    assert data["models"] == list(FOUR_MODELS)
+    assert set(data["models"]) == set(FOUR_MODELS)
     assert data["default_model"] == "claude-haiku-4-5-20251001"
 
 
-def test_form_endpoint_rejects_a_model_outside_the_matrix():
-    response = TestClient(app).get("/api/form", params={"model": "claude-opus-4.1"})
+def test_form_endpoint_rejects_a_model_llm_cannot_send():
+    """What it refuses is a model that cannot be sent, not one merely absent
+    from the dropdown: an older member of a series still has to load, because
+    a stored conversation keeps pointing at it.
+    """
+    response = TestClient(app).get(
+        "/api/form", params={"model": "claude-not-registered-anywhere"}
+    )
 
     assert response.status_code == 400
+
+
+def test_form_endpoint_accepts_a_superseded_model_for_old_conversations():
+    """Superseded is not the same as unusable: Sonnet 5 is still sendable."""
+    response = TestClient(app).get("/api/form", params={"model": "claude-sonnet-5"})
+
+    assert response.status_code == 200
+    assert response.json()["capabilities"]["id"] == "claude-sonnet-5"
 
 
 def test_the_ui_holds_no_model_specific_logic(static_page):

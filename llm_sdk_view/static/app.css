@@ -202,6 +202,11 @@ input:disabled, select:disabled {
 
 textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
+/* The composer is written into, not glanced at: three lines used to be
+   enough to start scrolling, which is a scrollbar in the middle of a
+   sentence. Five lines fit before it appears. */
+#prompt { min-height: 132px; }
+
 /* --- switch (booleans, Playground-style) -------------------------------------- */
 
 .switch {
@@ -401,15 +406,249 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   color: var(--text-faint);
   padding: 0 2px;
   font-family: var(--mono);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
 }
 
-.msg .body.streaming::after {
+/* The meta row's own copy control: quiet until hovered, like the row. */
+.copy-all {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.msg-meta:hover .copy-all, .copy-all.done { color: var(--accent); }
+
+/* --- assistant bubble regions ----------------------------------------------
+   An assistant body is a column of regions rather than one pre-wrap run of
+   text: thinking, tool use, the answer, the sources. */
+
+.msg.assistant .body { white-space: normal; }
+
+/* A region that has nothing to say must take no room at all. The `hidden`
+   attribute alone loses here: these are `display: flex`, and an author
+   `display` beats the browser's own rule for `hidden`, so an empty strip
+   would still be laid out and show up as blank lines above and below the
+   answer. Say it explicitly, one rule for every region that can be empty. */
+.think-strip[hidden], .tool-strip[hidden], .sources-head[hidden],
+.think-body[hidden], .tool-list[hidden], .sources-list[hidden] {
+  display: none;
+}
+
+.think-strip, .tool-strip, .sources-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+}
+
+.think-strip:hover, .tool-strip:hover, .sources-head:hover { color: var(--text); }
+
+.think-strip .chev, .tool-strip .chev, .sources-head .chev {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* Reasoning is quieter than the answer it produced: smaller, dimmer,
+   pre-wrap - it is shown as it streamed, not re-set as markdown. */
+.think-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-left: 2px solid var(--border);
+  margin: 4px 0 8px 2px;
+  padding: 2px 0 2px 10px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.tool-list {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 2px 0 6px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 3px 0 2px 14px;
+  font-size: 12px;
+}
+
+.sources-list a { color: var(--accent); overflow-wrap: anywhere; }
+
+/* The streaming caret rides the region that is currently growing. */
+.answer.streaming::after, .think-body.live::after {
   content: "▌";
   color: var(--caret);
   animation: blink 1s steps(2, start) infinite;
 }
 
 @keyframes blink { to { visibility: hidden; } }
+
+/* --- markdown in the answer ------------------------------------------------- */
+
+.answer { display: flex; flex-direction: column; gap: 8px; }
+
+.answer > :first-child { margin-top: 0; }
+
+.answer p { margin: 0; }
+
+.answer h3, .answer h4, .answer h5, .answer h6 {
+  margin: 6px 0 0;
+  line-height: 1.35;
+}
+
+.answer h3 { font-size: 15px; }
+
+.answer h4 { font-size: 13.5px; }
+
+.answer h5, .answer h6 { font-size: 13px; color: var(--text-dim); }
+
+.answer ul, .answer ol { margin: 0; padding-left: 22px; }
+
+.answer blockquote {
+  margin: 0;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+.answer blockquote p { margin: 0; }
+
+.answer code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.answer a { color: var(--accent); }
+
+/* A fenced block: dark-on-light like the inspector's pane, with its own
+   header row carrying the language and the copy button. */
+.codeblock {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--code-bg);
+}
+
+.codehead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 8px 3px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.codelang {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+.copycode {
+  border: 0;
+  background: none;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.codehead:hover .copycode, .copycode.done { color: var(--accent); }
+
+.codeblock pre {
+  margin: 0;
+  padding: 9px 12px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: transparent;
+}
+
+.codeblock pre code { background: none; padding: 0; border-radius: 0; }
+
+/* Tables scroll horizontally inside the bubble rather than deforming it. */
+.tablewrap { overflow-x: auto; }
+
+.answer table {
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 40%;
+}
+
+.answer th, .answer td {
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.answer th {
+  background: var(--bg-sunken);
+  font-weight: 600;
+}
+
+.answer td code, .answer th code { font-size: 11px; }
+
+/* --- the way back down -------------------------------------------------------
+   Offered when new content arrived while the user was reading higher up;
+   never inside the scroller it scrolls, or the scroller would clip it. */
+#jumpPill {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 14px;
+  z-index: 30;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+#jumpPill:hover { color: var(--text); border-color: var(--border-strong); }
+
+#jumpPill[hidden] { display: none; }
+
+/* Reduced motion: no blinking caret, no shake, no animated rides - content
+   simply appears where it is. Flashes of colour stay: they carry no motion. */
+@media (prefers-reduced-motion: reduce) {
+  .answer.streaming::after, .think-body.live::after { animation: none; }
+
+  .pill.hit { animation: none; }
+}
 
 /* --- topbar settings pills --------------------------------------------------
    The request's settings are pills in the header: each pill is one click

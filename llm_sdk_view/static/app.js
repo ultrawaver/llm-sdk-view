@@ -12,6 +12,9 @@ const state = {
   conversationId: null, conversationName: null,
   turns: [], tab: 'request', selected: null,
   cache: { anchor: null, lastInput: null },
+  // Draft text, kept per conversation: leaving a conversation and coming
+  // back must not cost the user what they had typed into it.
+  drafts: {},
   // Unit prices are fetched, not shipped, so "no estimate" needs a reason.
   rates: null,
   // The meter's empty-draft baseline, stashed from the form payload.
@@ -129,6 +132,62 @@ function renderCacheStatus() {
 
 setInterval(renderCacheStatus, 1000);
 let streaming = false;
+
+/* --- following the stream without stealing the reading place ----------------
+   New content scrolls the chat only while the user is already at the
+   bottom; once they scroll up to read, the stream keeps arriving but the
+   page stays put and offers the way back. Reduced motion turns the smooth
+   ride off: the jump is instant rather than animated. */
+const reducedMotion = window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const jumpPill = byId('jumpPill');
+let pinnedToBottom = true;
+/* While the pill's own smooth ride is in progress, the intermediate scroll
+   positions are not the user scrolling away: without this flag the ride
+   would unpin itself on its first frame and the stream would pull the pill
+   back out from under the click. */
+let ridingToBottom = false;
+
+function scrollChatToBottom(smooth) {
+  log.scrollTo({
+    top: log.scrollHeight,
+    behavior: smooth && !reducedMotion ? 'smooth' : 'auto'
+  });
+}
+
+/* Every append to the chat comes through here: follow when pinned, offer
+   the pill when not. */
+function followStream() {
+  if (pinnedToBottom) scrollChatToBottom(false);
+  else jumpPill.hidden = false;
+}
+
+let lastScrollTop = 0;
+log.addEventListener('scroll', () => {
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= 48;
+  if (atBottom) ridingToBottom = false;
+  // Only a hand moving up unpins. A programmatic follow-scroll's event
+  // fires after the stream has already grown past the position it scrolled
+  // to, and reading that as "the user left the bottom" would drop the pin
+  // in the middle of a turn the page is supposed to be following.
+  const movedUp = log.scrollTop < lastScrollTop;
+  lastScrollTop = log.scrollTop;
+  if (movedUp && !ridingToBottom) pinnedToBottom = false;
+  if (atBottom) pinnedToBottom = true;
+  if (pinnedToBottom) jumpPill.hidden = true;
+});
+
+/* A hand on the wheel or the glass cancels the ride: the user is driving
+   again, so their position wins over the pill's destination. */
+log.addEventListener('wheel', () => { ridingToBottom = false; }, { passive: true });
+log.addEventListener('touchstart', () => { ridingToBottom = false; }, { passive: true });
+
+jumpPill.addEventListener('click', () => {
+  pinnedToBottom = true;
+  ridingToBottom = true;
+  jumpPill.hidden = true;
+  scrollChatToBottom(true);
+});
 
 /* --- cost footer -------------------------------------------------------------
    The numbers are ResponseView.cost, computed server-side from a versioned
@@ -552,7 +611,15 @@ function thinkingStateName(value) {
 const PILL_DEFS = [
   {
     id: 'model', label: 'Model',
-    value: () => shortModelName(byId('model').value),
+    value: () => {
+      const select = byId('model');
+      const chosen = select.selectedOptions[0];
+      // A conversation can be older than the list: say so rather than let a
+      // superseded model look like a current one.
+      return chosen && chosen.dataset.superseded
+        ? shortModelName(select.value) + ' · legacy'
+        : shortModelName(select.value);
+    },
     menu: (menu) => {
       menuHead(menu, 'Model');
       (state.data.models || []).forEach((id) => {
@@ -562,6 +629,13 @@ const PILL_DEFS = [
           onPick: () => { closePillMenu(); setControl('model', id); }
         });
       });
+      // The list narrowed on purpose, and a short list that lost nine models
+      // without a word reads like missing data rather than like a rule.
+      const superseded = (state.data.superseded || []).length;
+      if (superseded) {
+        menuNote(menu, esc(superseded + ' earlier models not listed · one '
+          + 'model per series, newest first'));
+      }
     }
   },
   {
@@ -861,17 +935,29 @@ function latencyLabel(response) {
   return label;
 }
 
-function attachLatency(bodyEl, response) {
+/* The line under an assistant bubble: how long the turn took, how much it
+   said, why it stopped, and a copy of everything it said. The figures are
+   llm's own measurement and the provider's own usage; this page adds
+   nothing to them. */
+function attachMeta(bodyEl, response) {
+  const parts = [];
   const ms = response && response.duration_ms;
-  if (typeof ms !== 'number' || ms < 0) return;
-  const parts = [(ms / 1000).toFixed(2) + ' s'];
+  if (typeof ms === 'number' && ms >= 0) parts.push((ms / 1000).toFixed(2) + ' s');
   const out = response.usage && response.usage.output_tokens;
-  if (typeof out === 'number' && out > 0) {
-    parts.push(out + ' tok · ' + Math.round(out / (ms / 1000)) + ' tok/s');
-  }
+  if (typeof out === 'number' && out > 0) parts.push(out + ' out');
+  if (response.stop_reason) parts.push(response.stop_reason);
+  if (!parts.length) return;
   const meta = document.createElement('div');
   meta.className = 'msg-meta';
-  meta.textContent = parts.join(' · ');
+  const label = document.createElement('span');
+  label.textContent = parts.join(' · ');
+  meta.appendChild(label);
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'copy-all';
+  copy.title = 'Copy this answer (and its thinking, if any)';
+  copy.textContent = '⧉ copy all';
+  meta.appendChild(copy);
   meta.title = 'client-measured wall time from dispatch to stream end';
   bodyEl.parentElement.appendChild(meta);
 }
@@ -928,18 +1014,355 @@ function setBlocked(text, isError) {
   el.className = 'blocked' + (text ? ' on' : '') + (isError ? ' error' : '');
 }
 
-function addMessage(role, text, turnNo, when) {
+/* --- markdown-lite, built as DOM ------------------------------------------
+   Model output is text, never HTML: every element below is created and
+   filled with textContent, so a reply can contain anything and still only
+   ever render as the markup this function built. Headings, lists, bold /
+   italic / inline code, fenced code with highlighting and a copy button,
+   tables, and links - http(s) only, anything else stays literal text. */
+
+const INLINE_MARK = /(`[^`\n]+`)|(\[([^\]]+)\]\((https?:\/\/[^)\s]+)\))|(\*\*([^*]+)\*\*)|(\*([^*\n]+)\*)|(^|[^A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])/g;
+
+function appendInline(parent, text) {
+  // The recursion into bold/italic needs its own regex instance: a shared
+  // /g regex carries lastIndex across calls, and a nested scan would reset
+  // the outer one's position mid-string - matching the same span forever.
+  const mark = new RegExp(INLINE_MARK.source, 'g');
+  let last = 0;
+  let match;
+  while ((match = mark.exec(text)) !== null) {
+    // An underscore emphasis keeps its delimiter prefix as plain text.
+    const start = match[10] ? match.index + match[9].length : match.index;
+    if (start > last) {
+      parent.appendChild(document.createTextNode(text.slice(last, start)));
+    }
+    if (match[1]) {
+      const code = document.createElement('code');
+      code.textContent = match[1].slice(1, -1);
+      parent.appendChild(code);
+    } else if (match[2]) {
+      const link = document.createElement('a');
+      link.href = match[4];
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = match[3];
+      parent.appendChild(link);
+    } else if (match[5]) {
+      const strong = document.createElement('strong');
+      appendInline(strong, match[6]);
+      parent.appendChild(strong);
+    } else {
+      const em = document.createElement('em');
+      appendInline(em, match[8] || match[10]);
+      parent.appendChild(em);
+    }
+    last = mark.lastIndex;
+  }
+  if (text.length > last) {
+    parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+}
+
+/* A fenced block: the language label, a copy button, and the code itself,
+   highlighted only when the vendored Prism actually speaks the language. */
+function codeBlockElement(lang, codeText) {
+  const wrap = document.createElement('div');
+  wrap.className = 'codeblock';
+  const head = document.createElement('div');
+  head.className = 'codehead';
+  const name = document.createElement('span');
+  name.className = 'codelang';
+  name.textContent = lang || 'code';
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'copycode';
+  copy.title = 'Copy this code block';
+  copy.textContent = '⧉';
+  head.appendChild(name);
+  head.appendChild(copy);
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.textContent = codeText;
+  if (lang && window.Prism && Prism.languages[lang]) {
+    code.className = 'language-' + lang;
+    Prism.highlightElement(code);
+  }
+  pre.appendChild(code);
+  wrap.appendChild(head);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+function splitRow(line) {
+  let cells = line.trim();
+  if (cells.startsWith('|')) cells = cells.slice(1);
+  if (cells.endsWith('|')) cells = cells.slice(0, -1);
+  return cells.split('|').map((cell) => cell.trim());
+}
+
+/* The divider row under a table header: dashes with optional colons. */
+function isTableDivider(line) {
+  const cells = splitRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+function tableElement(headerLine, rowLines) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tablewrap';
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  splitRow(headerLine).forEach((cell) => {
+    const th = document.createElement('th');
+    appendInline(th, cell);
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  const tbody = document.createElement('tbody');
+  rowLines.forEach((line) => {
+    const tr = document.createElement('tr');
+    splitRow(line).forEach((cell) => {
+      const td = document.createElement('td');
+      appendInline(td, cell);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+const MD_HEADING = /^(#{1,6})\s+(.*)$/;
+const MD_UL = /^\s*[-*+]\s+(.*)$/;
+const MD_OL = /^\s*\d+[.)]\s+(.*)$/;
+const MD_QUOTE = /^>\s?(.*)$/;
+const MD_FENCE = /^```(\w*)\s*$/;
+
+/* A line starts a table when it is a row and the next line is the divider. */
+function startsTable(lines, i) {
+  return lines[i].trim().startsWith('|') && lines[i].includes('|', 1)
+    && i + 1 < lines.length && isTableDivider(lines[i + 1]);
+}
+
+function safeMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text).split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i += 1; continue; }
+    const fence = MD_FENCE.exec(line);
+    if (fence) {
+      const buf = [];
+      i += 1;
+      while (i < lines.length && !MD_FENCE.test(lines[i])) { buf.push(lines[i]); i += 1; }
+      i += 1; // the closing fence, or the end of an unterminated block
+      frag.appendChild(codeBlockElement(fence[1], buf.join('\n')));
+      continue;
+    }
+    if (startsTable(lines, i)) {
+      const rows = [];
+      const header = line;
+      i += 2;
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        rows.push(lines[i]);
+        i += 1;
+      }
+      frag.appendChild(tableElement(header, rows));
+      continue;
+    }
+    const heading = MD_HEADING.exec(line);
+    if (heading) {
+      // A bubble already sits inside a page with an h1/h2, so the reply's
+      // own outline starts at h3.
+      const level = Math.min(heading[1].length + 2, 6);
+      const h = document.createElement('h' + level);
+      appendInline(h, heading[2]);
+      frag.appendChild(h);
+      i += 1;
+      continue;
+    }
+    if (MD_UL.test(line) || MD_OL.test(line)) {
+      const ordered = !MD_UL.test(line);
+      const itemRe = ordered ? MD_OL : MD_UL;
+      const list = document.createElement(ordered ? 'ol' : 'ul');
+      while (i < lines.length) {
+        const item = itemRe.exec(lines[i]);
+        if (!item) break;
+        const li = document.createElement('li');
+        appendInline(li, item[1]);
+        list.appendChild(li);
+        i += 1;
+      }
+      frag.appendChild(list);
+      continue;
+    }
+    if (MD_QUOTE.test(line)) {
+      const bq = document.createElement('blockquote');
+      while (i < lines.length) {
+        const quoted = MD_QUOTE.exec(lines[i]);
+        if (!quoted) break;
+        const p = document.createElement('p');
+        appendInline(p, quoted[1]);
+        bq.appendChild(p);
+        i += 1;
+      }
+      frag.appendChild(bq);
+      continue;
+    }
+    const p = document.createElement('p');
+    const buf = [line];
+    i += 1;
+    // A paragraph runs until a blank line or the start of another block.
+    while (i < lines.length && lines[i].trim()
+           && !MD_HEADING.test(lines[i]) && !MD_UL.test(lines[i])
+           && !MD_OL.test(lines[i]) && !MD_QUOTE.test(lines[i])
+           && !MD_FENCE.test(lines[i]) && !startsTable(lines, i)) {
+      buf.push(lines[i]);
+      i += 1;
+    }
+    appendInline(p, buf.join('\n'));
+    frag.appendChild(p);
+  }
+  return frag;
+}
+
+function renderMarkdown(container, text) {
+  container.replaceChildren(safeMarkdown(text));
+}
+
+/* One bubble frame for both roles: the head (who · when) over a body. */
+function msgShell(role, turnNo, when) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   div.innerHTML = '<div class="msg-head"><span class="who"></span>'
     + '<time class="msg-time"></time></div><div class="body"></div>';
   if (turnNo) div.dataset.turn = String(turnNo - 1);
   div.querySelector('.who').textContent = turnNo ? role + ' · turn ' + turnNo : role;
-  div.querySelector('.body').textContent = text;
   setMessageTime(div, when);
   messages.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-  return div.querySelector('.body');
+  followStream();
+  return div;
+}
+
+function addMessage(role, text, turnNo, when) {
+  const div = msgShell(role, turnNo, when);
+  const body = div.querySelector('.body');
+  body.textContent = text;
+  return body;
+}
+
+/* An assistant bubble is regions over one body: the thinking strip, the
+   tool strip, the answer, the sources. What a turn never produced stays
+   hidden rather than drawn blank. */
+function addAssistantMessage(turnNo, when) {
+  const div = msgShell('assistant', turnNo, when);
+  const body = div.querySelector('.body');
+  body.innerHTML = '<button type="button" class="think-strip" hidden>'
+    + '<span class="chev">▸</span><span class="think-label"></span></button>'
+    + '<div class="think-body" hidden></div>'
+    + '<button type="button" class="tool-strip" hidden>'
+    + '<span class="chev">▸</span><span class="tool-label"></span></button>'
+    + '<div class="tool-list" hidden></div>'
+    + '<div class="answer"></div>'
+    + '<button type="button" class="sources-head" hidden>'
+    + '<span class="chev">▸</span><span class="sources-label"></span></button>'
+    + '<div class="sources-list" hidden></div>';
+  return body;
+}
+
+function assistantParts(body) {
+  return {
+    thinkStrip: body.querySelector('.think-strip'),
+    thinkLabel: body.querySelector('.think-label'),
+    thinkBody: body.querySelector('.think-body'),
+    toolStrip: body.querySelector('.tool-strip'),
+    toolLabel: body.querySelector('.tool-label'),
+    toolList: body.querySelector('.tool-list'),
+    answer: body.querySelector('.answer'),
+    sourcesHead: body.querySelector('.sources-head'),
+    sourcesLabel: body.querySelector('.sources-label'),
+    sourcesList: body.querySelector('.sources-list')
+  };
+}
+
+function wordCount(text) {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+/* The label a finished thinking strip carries: how long it took when this
+   page measured it, how much there is either way. A stored turn has no
+   clock of its own, so it names none instead of inventing one. */
+function thoughtLabel(thinking, seconds) {
+  const words = wordCount(thinking) + ' words';
+  return typeof seconds === 'number'
+    ? 'Thought for ' + seconds.toFixed(1) + 's · ' + words
+    : 'Thought · ' + words;
+}
+
+function showFinishedThinking(parts, thinking, seconds) {
+  parts.thinkStrip.hidden = false;
+  parts.thinkStrip.classList.remove('open');
+  parts.thinkStrip.querySelector('.chev').textContent = '▸';
+  parts.thinkBody.hidden = true;
+  parts.thinkBody.classList.remove('live');
+  parts.thinkBody.textContent = thinking;
+  parts.thinkLabel.textContent = thoughtLabel(thinking, seconds);
+}
+
+/* What the model looked up, from the server tool blocks on the Message:
+   one line per query behind a strip that names the first. */
+function showToolUse(parts, serverToolBlocks) {
+  const queries = (serverToolBlocks || [])
+    .filter((b) => b && b.type === 'server_tool_use' && b.name === 'web_search')
+    .map((b) => b.input && b.input.query)
+    .filter((q) => typeof q === 'string' && q);
+  if (!queries.length) return;
+  parts.toolStrip.hidden = false;
+  parts.toolLabel.textContent = queries.length === 1
+    ? 'Searched the web: "' + queries[0] + '"'
+    : 'Searched the web ' + queries.length + ' times';
+  queries.forEach((q) => {
+    const row = document.createElement('div');
+    row.textContent = '"' + q + '"';
+    parts.toolList.appendChild(row);
+  });
+}
+
+/* The pages an answer cites, deduplicated by URL; a citation with no
+   linkable address is not a source and is not listed as one. */
+function showSources(parts, citations) {
+  const seen = new Set();
+  const links = [];
+  (citations || []).forEach((citation) => {
+    const url = citation && citation.url;
+    if (typeof url !== 'string' || !/^https?:\/\//.test(url) || seen.has(url)) return;
+    seen.add(url);
+    links.push(citation);
+  });
+  if (!links.length) return;
+  parts.sourcesHead.hidden = false;
+  parts.sourcesLabel.textContent = 'Sources (' + links.length + ')';
+  links.forEach((citation) => {
+    const a = document.createElement('a');
+    a.href = citation.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = citation.title || citation.url;
+    parts.sourcesList.appendChild(a);
+  });
+}
+
+/* A stored turn redraws the same regions the stream filled live, read off
+   the record alone. */
+function renderAssistantRecord(body, response) {
+  const parts = assistantParts(body);
+  if (response.thinking) showFinishedThinking(parts, response.thinking, null);
+  showToolUse(parts, response.server_tool_blocks);
+  renderMarkdown(parts.answer, response.text || '');
+  showSources(parts, response.citations);
 }
 
 /* The time above a bubble. The record's own stamp is the only clock a turn
@@ -990,8 +1413,66 @@ function flash(bubble) {
   setTimeout(() => bubble.classList.remove('hit'), 400);
 }
 
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (ex) {
+    return false;
+  }
+}
+
+/* A copy control inside a bubble: a code block's ⧉ copies that block; the
+   meta row's ⧉ copy all copies the turn's whole answer, thinking included.
+   Both say ✓ for a moment, and neither is the bubble asking for its pane. */
+function copyControl(button) {
+  let text = '';
+  if (button.classList.contains('copycode')) {
+    const block = button.closest('.codeblock');
+    text = block ? block.querySelector('code').textContent : '';
+  } else {
+    const msg = button.closest('.msg[data-turn]');
+    const record = msg && state.turns[Number(msg.dataset.turn)];
+    if (!record) return;
+    const thinking = record.response.thinking;
+    text = thinking ? thinking + '\n\n' + record.response.text : record.response.text;
+  }
+  copyText(text);
+  const label = button.textContent;
+  button.textContent = '✓';
+  button.classList.add('done');
+  setTimeout(() => {
+    button.textContent = label;
+    button.classList.remove('done');
+  }, 1200);
+}
+
+/* The collapsible regions of an assistant bubble - thinking, tool use,
+   sources - share one toggle: open shows the region, closed hides it, and
+   the chevron says which. */
+function toggleRegion(button) {
+  const body = button.parentElement;
+  const region = button.classList.contains('think-strip')
+    ? body.querySelector('.think-body')
+    : button.classList.contains('tool-strip')
+      ? body.querySelector('.tool-list')
+      : body.querySelector('.sources-list');
+  const open = region.hidden;
+  region.hidden = !open;
+  button.classList.toggle('open', open);
+  button.querySelector('.chev').textContent = open ? '▾' : '▸';
+}
+
 messages.addEventListener('click', (event) => {
   if (!(event.target instanceof Element)) return;
+  // Controls inside a bubble answer their own click first: copy buttons,
+  // the region toggles, links out. None of them is the bubble asking for
+  // its pane, so the pane logic below never sees them.
+  const copy = event.target.closest('.copycode, .copy-all');
+  if (copy) { copyControl(copy); return; }
+  const toggle = event.target.closest('.think-strip, .tool-strip, .sources-head');
+  if (toggle) { toggleRegion(toggle); return; }
+  if (event.target.closest('a')) return;
   const bubble = event.target.closest('.msg[data-pane]');
   if (!bubble) return;
   const index = Number(bubble.dataset.turn);
@@ -1025,6 +1506,7 @@ function currentFormOptions() {
     effort: byId('effort').value,
     web_search: byId('webSearch').value === 'true',
     web_search_type: byId('webSearchType').value,
+    allowed_callers: byId('allowedCallers').value,
     response_inclusion: byId('responseInclusion').value,
     max_uses: Number(byId('maxUses').value),
     cache_control: byId('cacheControl').value === 'true'
@@ -1134,13 +1616,25 @@ function wireSettingsCard(div, turnIndex) {
 
 /* The cache prefix is system + tools + messages, so only a change to the
    model, the system prompt or the web-search tool's shape invalidates the
-   cached prefix. max_tokens, effort and thinking are not part of it and
-   must not warn. With caching off the message is not "invalidated" - the
-   turn simply will not read or write the cache. */
+   cached prefix. max_tokens, effort, thinking and allowed_callers are not
+   part of it, so they are reported as a difference and never as a cache
+   miss - a warning that blames the cache for a change that cannot cost a
+   hit is a wrong warning. With caching off the message is not "invalidated"
+   - the turn simply will not read or write the cache. */
 const CACHE_PREFIX_FIELDS = [
   ['model', 'model'], ['system', 'system'],
   ['web_search', 'web search'], ['web_search_type', 'search version'],
   ['max_uses', 'max uses'], ['response_inclusion', 'response inclusion']
+];
+
+/* Not part of the prefix, so they must never be reported as a cache miss -
+   but the request they produce does differ from the last turn, and the user
+   is told so. `allowed_callers` is here because llm-anthropic cannot send
+   it at all: the value in effect is the API default on every request. */
+const OTHER_REQUEST_FIELDS = [
+  ['thinking', 'thinking'], ['effort', 'effort'],
+  ['max_tokens', 'max output tokens'],
+  ['allowed_callers', 'allowed callers']
 ];
 
 function updateCacheWarn() {
@@ -1159,17 +1653,31 @@ function updateCacheWarn() {
     return;
   }
   const form = currentFormOptions();
-  const changed = CACHE_PREFIX_FIELDS
+  const differs = (fields) => fields
     .filter(([key]) => String(form[key] ?? '') !== String(lastOptions[key] ?? ''))
     .map(([, label]) => label);
-  if (!changed.length) {
+  const prefixChanged = differs(CACHE_PREFIX_FIELDS);
+  const otherChanged = differs(OTHER_REQUEST_FIELDS);
+  if (!prefixChanged.length && !otherChanged.length) {
     el.hidden = true;
     return;
   }
-  text.innerHTML = '<b>' + esc(changed.join(', ')) + '</b> changed since the'
+  // Only a prefix change can cost a cache hit, so only a prefix change says
+  // so. The rest still differs from the last turn, and still gets named.
+  if (!prefixChanged.length) {
+    text.innerHTML = '<b>' + esc(otherChanged.join(', ')) + '</b> differ from'
+      + ' the last turn <span class="why">· none of these touch the cached'
+      + ' prefix</span>';
+    el.hidden = false;
+    return;
+  }
+  text.innerHTML = '<b>' + esc(prefixChanged.join(', ')) + '</b> changed since the'
     + ' last turn — this turn won\'t reuse the cached prefix'
-    + ' <span class="why">· max_tokens, effort and thinking don\'t affect the'
-    + ' cache</span>';
+    + (otherChanged.length
+      ? ' <span class="why">· also ' + esc(otherChanged.join(', '))
+        + ', which don\'t affect the cache</span>'
+      : ' <span class="why">· max output tokens, effort, thinking and allowed'
+        + ' callers don\'t affect the cache</span>');
   el.hidden = false;
 }
 
@@ -1802,7 +2310,93 @@ async function loadConversations() {
   renderChatTitle();
 }
 
+/* --- what belongs to a conversation: its draft, and its settings ------------- */
+
+/* Drafts are keyed by the conversation they were typed into. An unsaved
+   conversation is not keyed `null`: that is also "no conversation at all",
+   and the two must not share what the user wrote. */
+const NEW_DRAFT_KEY = '__new__';
+
+function draftKey() {
+  return state.conversationId || NEW_DRAFT_KEY;
+}
+
+function saveDraft() {
+  const text = byId('prompt').value;
+  if (text) state.drafts[draftKey()] = text;
+  else delete state.drafts[draftKey()];
+}
+
+function restoreDraft() {
+  byId('prompt').value = state.drafts[draftKey()] || '';
+}
+
+function clearDraft() {
+  delete state.drafts[draftKey()];
+}
+
+/* The settings a stored conversation ended with, written onto a form that
+   apply() has already filled with the model's own defaults and
+   capabilities: a stored value is only restorable while the model still
+   offers it, and a control the runtime cannot honour keeps its status
+   rather than being silently switched. */
+function applyStoredOptions(options) {
+  if (!options || !Object.keys(options).length) return;
+
+  const restore = (id, value) => {
+    if (value === null || value === undefined || value === '') return;
+    const select = byId(id);
+    // A value this model no longer offers stays at the model's default.
+    // Writing it anyway would show a request the control cannot make.
+    const known = Array.from(select.options).some((o) => o.value === String(value));
+    if (known) select.value = String(value);
+  };
+  restore('thinking', options.thinking);
+  restore('effort', options.effort);
+  restore('webSearchType', options.web_search_type);
+  restore('allowedCallers', options.allowed_callers);
+  restore('responseInclusion', options.response_inclusion);
+
+  if (typeof options.system === 'string') byId('system').value = options.system;
+  if (typeof options.max_tokens === 'number') {
+    const ceiling = Number(byId('maxTokens').max);
+    const value = ceiling ? Math.min(options.max_tokens, ceiling) : options.max_tokens;
+    byId('maxTokens').value = value;
+  }
+  if (typeof options.max_uses === 'number') byId('maxUses').value = options.max_uses;
+  if (typeof options.web_search === 'boolean') {
+    byId('webSearch').value = options.web_search ? 'true' : 'false';
+  }
+  if (typeof options.cache_control === 'boolean') {
+    byId('cacheControl').value = options.cache_control ? 'true' : 'false';
+  }
+
+  applyEffortState();
+  applyThinkingState();
+  refresh();
+}
+
+/* A stored conversation can point at a model the list no longer offers,
+   because its own series moved on. It still has to be selectable: that turn
+   was sent with it, and applying another model's capabilities to it would be
+   a lie about what happens next. It is added marked, never silently
+   equated with the model that superseded it. */
+function ensureModelOption(id) {
+  const select = byId('model');
+  if (!id) return false;
+  if (Array.from(select.options).some((option) => option.value === id)) return false;
+  const option = document.createElement('option');
+  option.value = id;
+  option.textContent = shortModelName(id);
+  option.dataset.superseded = 'true';
+  option.title = 'used by this conversation, no longer the newest member of '
+    + 'its series';
+  select.appendChild(option);
+  return true;
+}
+
 async function openConversation(id) {
+  saveDraft();
   const data = await (await fetch('/api/conversations/' + id)).json();
   if (data.error) {
     setBlocked(data.error, true);
@@ -1822,11 +2416,24 @@ async function openConversation(id) {
   const lastTurn = data.turns[data.turns.length - 1];
   state.cache.lastInput = lastTurn && lastTurn.response
     && lastTurn.response.usage ? lastTurn.response.usage.input_tokens : null;
-  const first = data.turns[0];
-  if (first) {
-    byId('model').value = (first.options || {}).model || byId('model').value;
+  // Settings belong to the conversation, not to the tab: a conversation is
+  // reopened with the settings its own last turn used, so the next turn
+  // continues it instead of quietly changing the request underneath it.
+  // The model goes on first - it decides which defaults and capabilities
+  // apply() writes, and the rest is restored over those.
+  const lastOptions = (lastTurn && lastTurn.options) || {};
+  const wantedModel = lastOptions.model;
+  // The select may still be empty on the first conversation opened, so the
+  // options have to exist before a stored id can be added to them. Model
+  // first anyway: it decides which defaults and capabilities apply() writes.
+  await loadForm();
+  if (wantedModel && byId('model').value !== wantedModel) {
+    ensureModelOption(wantedModel);
+    byId('model').value = wantedModel;
     await loadForm();
   }
+  applyStoredOptions(lastOptions);
+  restoreDraft();
   data.turns.forEach((record, index) => {
     // Both panes of a stored turn come from what was recorded, never from
     // a second reconstruction of the provider response.
@@ -1835,10 +2442,9 @@ async function openConversation(id) {
       if (diff.length) messages.appendChild(dividerFor(diff));
     }
     const user = addMessage('user', record.user_input, index + 1, record.timestamp);
-    const assistant = addMessage(
-      'assistant', record.response.text || '', index + 1, record.timestamp
-    );
-    attachLatency(assistant, record.response);
+    const assistant = addAssistantMessage(index + 1, record.timestamp);
+    renderAssistantRecord(assistant, record.response);
+    attachMeta(assistant, record.response);
     wireBubble(user.parentElement, index, 'request',
       'Show the request this turn sent');
     wireBubble(assistant.parentElement, index, 'response',
@@ -1846,6 +2452,9 @@ async function openConversation(id) {
     wireSettingsCard(user.parentElement, index);
     wireSettingsCard(assistant.parentElement, index);
   });
+  // Opening a conversation lands at its end, where the next turn goes.
+  pinnedToBottom = true;
+  scrollChatToBottom(false);
   state.selected = data.turns.length - 1;
   showTurn(state.selected);
   refreshCost();
@@ -1872,7 +2481,8 @@ function showTurn(index, tab) {
   refreshCost();
 }
 
-function startNewConversation() {
+async function startNewConversation() {
+  saveDraft();
   messages.innerHTML = '';
   state.conversationId = null;
   state.conversationName = null;
@@ -1881,7 +2491,10 @@ function startNewConversation() {
   state.selected = null;
   state.request = null;
   state.cache = { anchor: null, lastInput: null };
-  byId('prompt').value = '';
+  // A new conversation is the one case that starts from the model's
+  // defaults: there is no last turn of its own to continue.
+  await loadForm();
+  restoreDraft();
   renderPane();
   refreshCost();
   renderCacheStatus();
@@ -1958,14 +2571,64 @@ byId('send').addEventListener('click', async () => {
   const sentAt = new Date();
   const userBody = addMessage('user', text, turnNo, sentAt);
   byId('prompt').value = '';
-  const body = addMessage('assistant', '', turnNo, sentAt);
-  body.classList.add('streaming');
+  // Sent, so it is no longer a draft waiting in this conversation.
+  clearDraft();
+  const body = addAssistantMessage(turnNo, sentAt);
+  // Named `bubble`, never `parts`: the SSE parser below splits its buffer
+  // into a local `parts`, and a same-named binding here would be shadowed
+  // inside the read loop - the first reasoning chunk would land on an
+  // array and kill the stream.
+  const bubble = assistantParts(body);
+  // Sending is a decision to read what comes back: follow this stream.
+  pinnedToBottom = true;
+  let streamedText = '';
+  let answerRenderQueued = false;
+  // The thinking clock starts at the first reasoning chunk and stops when
+  // the turn is done; its reading is what the finished strip reports.
+  let thinkStarted = null;
+  let thinkTimer = null;
   const sent = payload(text);
   state.fresh = false;
 
+  /* Markdown re-parsed at most every 120ms while the answer streams, so a
+     half-typed fence or table row never costs more than a frame of lag. */
+  const queueAnswerRender = () => {
+    if (answerRenderQueued) return;
+    answerRenderQueued = true;
+    setTimeout(() => {
+      answerRenderQueued = false;
+      renderMarkdown(bubble.answer, streamedText);
+      followStream();
+    }, 120);
+  };
+
+  const thinkTick = () => {
+    bubble.thinkLabel.textContent = 'Thinking… ' + clock(performance.now() - thinkStarted);
+  };
+
+  const startThinking = () => {
+    thinkStarted = performance.now();
+    bubble.thinkStrip.hidden = false;
+    bubble.thinkStrip.classList.add('open');
+    bubble.thinkStrip.querySelector('.chev').textContent = '▾';
+    bubble.thinkBody.hidden = false;
+    bubble.thinkBody.classList.add('live');
+    thinkTick();
+    thinkTimer = setInterval(thinkTick, 250);
+  };
+
+  const stopThinkClock = () => {
+    if (thinkTimer) {
+      clearInterval(thinkTimer);
+      thinkTimer = null;
+    }
+    bubble.thinkBody.classList.remove('live');
+  };
+
   const finish = () => {
     streaming = false;
-    body.classList.remove('streaming');
+    stopThinkClock();
+    bubble.answer.classList.remove('streaming');
     byId('send').innerHTML = 'Send <span class="key-hint">⌘⏎</span>';
     byId('send').disabled = state.blocked || state.fits === false;
   };
@@ -1998,13 +2661,37 @@ byId('send').addEventListener('click', async () => {
         if (state.tab === 'request') renderPane();
         showContext(event.context);
       } else if (event.type === 'text') {
-        body.textContent += event.text;
-        log.scrollTop = log.scrollHeight;
+        // The answer arriving collapses the thinking it came from.
+        if (thinkStarted !== null && bubble.thinkStrip.classList.contains('open')) {
+          bubble.thinkStrip.classList.remove('open');
+          bubble.thinkStrip.querySelector('.chev').textContent = '▸';
+          bubble.thinkBody.hidden = true;
+        }
+        bubble.answer.classList.add('streaming');
+        streamedText += event.text;
+        queueAnswerRender();
+      } else if (event.type === 'reasoning') {
+        if (thinkStarted === null) startThinking();
+        bubble.thinkBody.textContent += event.text;
+        bubble.thinkBody.scrollTop = bubble.thinkBody.scrollHeight;
+        followStream();
       } else if (event.type === 'done') {
-        body.textContent = event.text;
+        // The finished Message outranks the stream's fragments: text and
+        // thinking are both re-rendered from it, so display and storage
+        // can never disagree about what the model said.
+        stopThinkClock();
+        streamedText = event.text;
+        renderMarkdown(bubble.answer, streamedText);
+        bubble.answer.classList.remove('streaming');
+        const thinking = event.thinking
+          || (thinkStarted !== null ? bubble.thinkBody.textContent : null);
+        if (thinking) {
+          showFinishedThinking(bubble, thinking, thinkStarted !== null
+            ? (performance.now() - thinkStarted) / 1000 : null);
+        }
         state.fits = event.context ? event.context.fits : null;
         showContext(event.context);
-        log.scrollTop = log.scrollHeight;
+        followStream();
       } else if (event.type === 'record') {
         // One record drives every view of the turn: the bubble above was
         // already written from the same Message this came from.
@@ -2025,7 +2712,9 @@ byId('send').addEventListener('click', async () => {
           'Show the response this turn came back with');
         wireSettingsCard(userBody.parentElement, state.selected);
         wireSettingsCard(body.parentElement, state.selected);
-        attachLatency(body, event.record.response);
+        showToolUse(bubble, event.record.response.server_tool_blocks);
+        showSources(bubble, event.record.response.citations);
+        attachMeta(body, event.record.response);
         const anchor = cacheAnchorOf(event.record);
         if (anchor) state.cache.anchor = anchor;
         const usage = event.record.response.usage || {};

@@ -36,12 +36,25 @@ Model facts come from three ranked sources, resolved in
    capabilities. Read through the Anthropic SDK (never through `llm`, so
    nothing lands in the prompt log), cached on disk, refreshed in the
    background so the page never waits for the network.
+
 2. The **fallback profile** `llm_sdk_view/models.json` — a versioned snapshot
    of Anthropic's published specs for the four current models, used only when
    the API is unavailable and always labelled as a fallback.
 3. The **installed llm-anthropic** — what can actually go on the wire: tool
    version per model, whether thinking can be disabled, which tool options
    exist.
+
+### What reaches the dropdown
+
+The API supplies every model, but the dropdown offers one model per series,
+newest first: `llm_sdk_view/model_series.py` reads the family and version out
+of each id, so when a new member of an existing series arrives it replaces the
+old one on the next read, with nothing hand-maintained here. Two further gates
+decide what is offered: the installed plugin must be able to resolve the id
+(otherwise this project cannot send the request), and what the narrowing left
+out is reported back to the page rather than silently dropped. A stored
+conversation whose model has since been superseded adds it back, marked
+`legacy` — superseded means no longer listed, not unusable.
 
 Only narrow rules the Models API does not expose are hard-coded: default effort
 and default thinking state per model, whether thinking can be switched off and
