@@ -72,6 +72,9 @@ def test_a_cache_writing_turn_starts_the_countdown(
     assert badge["face"] == "live"
     # The live face is a real badge, not bare text: it has a background.
     assert badge["bg"] != "rgba(0, 0, 0, 0)"
+    # And the countdown is running, not held: a completed turn leaves no
+    # freeze behind.
+    assert page.evaluate("() => state.cache.frozen") is None
 
 
 def test_the_badge_escalates_as_the_window_closes(page):
@@ -112,10 +115,13 @@ def test_the_pulse_dies_when_the_user_asked_for_no_motion(page):
     assert urgent["anim"] == "none"
 
 
-def test_a_naive_utc_stamp_is_not_read_as_local_time(page):
-    """llm's older stored stamps are UTC with no zone marker. Read as local
-    time the anchor moves by the whole timezone offset, and a live cache
-    would instantly report itself hours expired."""
+def test_the_anchor_is_the_answers_end_read_like_every_other_stamp(page):
+    """The countdown starts when the answer finished landing (see the
+    module comment in app.js for why the documented request-start rule was
+    measured and lost). Two consequences pinned here: a zone-less stamp is
+    read as UTC (never as local time, which would move the anchor by the
+    whole timezone offset), and llm's duration is NOT subtracted - the end
+    of the turn is the anchor, not its start."""
     drift = page.evaluate(
         """() => {
             const end = new Date().toISOString();
@@ -123,16 +129,103 @@ def test_a_naive_utc_stamp_is_not_read_as_local_time(page):
             const anchor = cacheAnchorOf({
                 timestamp: naive,
                 response: { usage: { cache_read_input_tokens: 10 },
-                            duration_ms: 2000 },
+                            duration_ms: 120000 },
             });
             if (!anchor) return null;
-            return Math.abs((Date.parse(end) - 2000) - anchor.at);
+            return Math.abs(Date.parse(end) - anchor.at);
         }"""
     )
     assert drift is not None
-    # The anchor must land within a few seconds of the request's start,
-    # never hours away.
+    # Right at the answer's end: never minutes earlier (the old start
+    # anchor), never hours away (a local-time misread).
     assert drift < 5000
+
+
+def test_pressing_send_freezes_the_countdown_where_it_was(page, key):
+    """The user's rule: the countdown stops only at zero or when the send
+    key is pressed - and a send holds the reading it had. The request is
+    hung on purpose (fetch never resolves), so the frozen state is what the
+    page shows for the whole wait."""
+    page.evaluate(
+        """() => {
+            state.cache.anchor = {
+                at: Date.now() - (CACHE_TTL_MS - 234000),
+                kind: 'read', tokens: 2048,
+            };
+            renderCacheStatus();
+            window.fetch = () => new Promise(() => {});
+        }"""
+    )
+    page.fill("#prompt", "hold it there")
+    page.click("#send")
+    page.wait_for_function("() => state.cache.frozen !== null")
+    badge = page.evaluate(BADGE)
+    assert badge["text"] == "TTL 3:54", badge
+    assert badge["face"] == "live"
+    assert badge["anim"] == "none"
+    frozen = page.evaluate(
+        """() => {
+            const el = byId('cacheState');
+            return { flag: el.dataset.frozen,
+                     opacity: getComputedStyle(el).opacity,
+                     title: el.title };
+        }"""
+    )
+    assert frozen["flag"] == "yes"
+    # Dimmed: a held value, not a live one.
+    assert float(frozen["opacity"]) < 1
+    assert "resumes" in frozen["title"]
+
+
+def test_a_failed_send_thaws_the_countdown(page, key):
+    """An untouched cache keeps its old clock: a send that never reached
+    the provider hands the running countdown back."""
+    page.evaluate(
+        """() => {
+            state.cache.anchor = {
+                at: Date.now() - (CACHE_TTL_MS - 234000),
+                kind: 'read', tokens: 2048,
+            };
+            renderCacheStatus();
+            window.fetch = () => Promise.reject(new Error('offline'));
+        }"""
+    )
+    page.fill("#prompt", "this goes nowhere")
+    page.click("#send")
+    page.wait_for_function(
+        "() => state.cache.frozen === null && state.cache.anchor !== null"
+    )
+    badge = page.evaluate(BADGE)
+    # Back to counting from the same anchor, give or take the test's own
+    # runtime - never restarted, never stuck frozen.
+    assert re.match(r"^TTL 3:5", badge["text"]), badge
+    assert badge["face"] == "live"
+
+
+def test_the_record_event_restarts_a_frozen_countdown(
+    page, key, fake_provider, response_scenario
+):
+    """The answer landing is the other half of the rule: the freeze lifts
+    and a fresh five minutes starts from that moment."""
+    response_scenario(CACHE_WRITING_TURN)
+    page.evaluate(
+        """() => {
+            state.cache.anchor = {
+                at: Date.now() - (CACHE_TTL_MS - 200000),
+                kind: 'read', tokens: 2048,
+            };
+        }"""
+    )
+    page.fill("#prompt", "hi")
+    page.click("#send")
+    page.wait_for_function("() => state.cache.frozen !== null")
+    page.wait_for_function(
+        "() => state.cache.frozen === null && state.cache.anchor !== null"
+    )
+    badge = page.evaluate(BADGE)
+    # A fresh window, minus the fake turn's own runtime.
+    assert re.match(r"^TTL [45]:", badge["text"]), badge
+    assert badge["face"] == "live"
 
 
 def test_a_conversation_reopened_days_later_reads_like_information(page):

@@ -11,7 +11,7 @@ const state = {
   data: null, caps: null, blocked: false, fits: null,
   conversationId: null, conversationName: null,
   turns: [], tab: 'request', selected: null,
-  cache: { anchor: null, lastInput: null },
+  cache: { anchor: null, lastInput: null, frozen: null },
   // Draft text, kept per conversation: leaving a conversation and coming
   // back must not cost the user what they had typed into it.
   drafts: {},
@@ -23,10 +23,16 @@ const state = {
 
 /* Prompt-cache lifetime. llm-anthropic sends the default ephemeral marker,
    so the TTL is the provider default of 5 minutes; the runtime exposes no
-   setting for it. The documented lifetime starts at the START of the
-   request that wrote or read the entry, not at the end of its response -
-   so the anchor is the turn's start (its timestamp minus llm's measured
-   duration), and a long streaming answer eats into the window. */
+   setting for it. The anchor is the moment the answer FINISHED landing -
+   not the start of the request that Anthropic's documentation names. That
+   documented rule was measured against this account's own history and lost:
+   turns that began 335.6s and 338.9s after the previous request started
+   still read the cache (12 hits, 0 misses), which a 5-minute clock from
+   request start says cannot happen, while a clock from the end of the
+   answer fits every one of them. It is also the only anchor the user can
+   act on: they cannot send the follow-up before they have read the answer.
+   No miss has ever been observed, so this is the best-fitting model, not a
+   verified one - the note under the countdown says where it counts from. */
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 /* The countdown's faces: green while the window is comfortable, amber in
@@ -53,12 +59,11 @@ function cacheAnchorOf(record) {
   if (!touch) return null;
   // momentOf, not Date.parse: a stored stamp can be llm's naive UTC form,
   // which Date.parse would read as local time and move the anchor by the
-  // whole timezone offset.
+  // whole timezone offset. The stamp is the turn's end - llm files the
+  // turn when the stream closes - and the end is the anchor (see above).
   const end = momentOf(record.timestamp);
   if (!end) return null;
-  const duration = typeof record.response.duration_ms === 'number'
-    ? record.response.duration_ms : 0;
-  return { at: end.getTime() - duration, kind: touch.kind, tokens: touch.tokens };
+  return { at: end.getTime(), kind: touch.kind, tokens: touch.tokens };
 }
 
 function clock(ms) {
@@ -124,10 +129,26 @@ function renderCacheStatus() {
   const minimum = state.caps ? state.caps.min_cacheable_tokens : null;
   const anchor = state.cache.anchor;
   if (anchor) {
-    const remaining = anchor.at + CACHE_TTL_MS - Date.now();
+    const frozen = state.cache.frozen;
+    const remaining = frozen
+      ? frozen.remaining : anchor.at + CACHE_TTL_MS - Date.now();
     const face = remaining > TTL_WARN_MS ? 'live'
       : remaining > TTL_URGENT_MS ? 'warn'
         : remaining > 0 ? 'urgent' : 'expired';
+    // A number that will not say where it counts from cannot be checked,
+    // so the anchor rides on the badge as its tooltip.
+    stateEl.title = 'counted from when the answer landed · the next hit refreshes it';
+    stateEl.dataset.frozen = frozen ? 'yes' : 'no';
+    if (frozen) {
+      // Frozen by the send key: the margin the send had stays up while the
+      // answer streams, then the record event starts a fresh countdown.
+      say('TTL ' + clock(remaining),
+        'Sent with ' + clock(remaining)
+        + ' to spare — the countdown resumes from the answer\u2019s end when it lands',
+        face);
+      stateEl.title = 'cache was alive when this turn was sent · counting resumes when the answer lands';
+      return;
+    }
     if (face === 'expired') {
       say('cache expired',
         'Expired ' + ago(-remaining)
@@ -146,10 +167,12 @@ function renderCacheStatus() {
     }
     say('TTL ' + clock(remaining),
       touched + ' · expires in ' + clock(remaining)
-      + ' · the next hit refreshes the 5-minute TTL for free',
+      + ' · counted from the answer\u2019s end; the next hit refreshes it for free',
       face);
     return;
   }
+  stateEl.title = '';
+  stateEl.dataset.frozen = 'no';
   const input = state.cache.lastInput;
   if (typeof input === 'number' && minimum && input < minimum) {
     say('not cached',
@@ -947,10 +970,13 @@ function renderPills() {
   else anchorPillMenu();
 }
 
-document.addEventListener('click', closePillMenu);
+document.addEventListener('click', () => { closePillMenu(); closeConvMenu(); });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closePillMenu();
+  if (event.key === 'Escape') { closePillMenu(); closeConvMenu(); }
 });
+// A context menu belongs to the row it opened from; the row scrolling away
+// under it is the end of the conversation between them.
+window.addEventListener('scroll', closeConvMenu, true);
 // A fixed overlay has to be told when its anchor moves. Capture, so the
 // pill row's own horizontal scrolling counts too.
 window.addEventListener('resize', anchorPillMenu);
@@ -2300,6 +2326,83 @@ byId('chatTitleInput').addEventListener('keydown', (event) => {
 });
 byId('chatTitleInput').addEventListener('blur', commitRename);
 
+/* --- per-conversation menu: export and delete ------------------------------
+   Same rules as the pill menus: mounted in #pillLayer because the sidebar
+   is a scroll container that would clip a nested menu, placed from the
+   kebab's rect by the one placing function. */
+let convMenu = null;
+
+function closeConvMenu() {
+  if (!convMenu) return;
+  convMenu.el.remove();
+  convMenu = null;
+}
+
+function openConvMenu(anchor, item) {
+  if (convMenu && convMenu.id === item.id) { closeConvMenu(); return; }
+  closeConvMenu();
+  closePillMenu();
+  const menu = document.createElement('div');
+  menu.className = 'pill-menu conv-menu';
+  menu.setAttribute('role', 'menu');
+  menu.addEventListener('click', (event) => event.stopPropagation());
+  byId('pillLayer').appendChild(menu);
+  convMenu = { el: menu, id: item.id };
+
+  menuItem(menu, {
+    label: 'Export Markdown',
+    sub: 'the whole conversation as one .md file',
+    onPick: () => {
+      closeConvMenu();
+      // The server sets Content-Disposition, so a plain link is the
+      // download: no fetch, no blob, no object URL to forget to revoke.
+      const link = document.createElement('a');
+      link.href = '/api/conversations/' + encodeURIComponent(item.id) + '/export.md';
+      link.download = '';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    },
+  });
+
+  // Delete is two clicks on purpose: the first turns the item into the
+  // confirmation, so a misclick can never cost a conversation.
+  let confirming = false;
+  const deleteItem = menuItem(menu, {
+    label: 'Delete…',
+    sub: 'remove this conversation from history',
+    onPick: async () => {
+      if (!confirming) {
+        confirming = true;
+        deleteItem.classList.add('danger');
+        deleteItem.querySelector('.grow').innerHTML = esc('Really delete?')
+          + '<span class="sub">' + esc('cannot be undone — click again') + '</span>';
+        return;
+      }
+      deleteItem.classList.add('disabled');
+      try {
+        const res = await fetch(
+          '/api/conversations/' + encodeURIComponent(item.id),
+          { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || ('HTTP ' + res.status));
+        }
+      } catch (ex) {
+        closeConvMenu();
+        byId('historyNote').textContent = 'delete failed: ' + ex.message;
+        return;
+      }
+      closeConvMenu();
+      // Deleting the conversation on screen is also leaving it.
+      if (state.conversationId === item.id) startNewConversation();
+      await loadConversations();
+    },
+  });
+
+  anchorOverlay(menu, anchor, { align: 'right' });
+}
+
 async function loadConversations() {
   let data;
   try {
@@ -2322,6 +2425,8 @@ async function loadConversations() {
     return;
   }
   data.items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'conv-row';
     const button = document.createElement('button');
     button.className = 'conversation'
       + (item.id === state.conversationId ? ' current' : '');
@@ -2334,7 +2439,21 @@ async function loadConversations() {
     button.appendChild(label);
     button.appendChild(meta);
     button.addEventListener('click', () => openConversation(item.id));
-    list.appendChild(button);
+    // The kebab is a sibling, never a child: a button inside a button is
+    // not a thing a browser will click reliably.
+    const kebab = document.createElement('button');
+    kebab.className = 'conv-kebab';
+    kebab.textContent = '⋯';
+    kebab.title = 'Export or delete this conversation';
+    kebab.setAttribute('aria-label', 'More actions for ' + item.name);
+    kebab.setAttribute('aria-haspopup', 'menu');
+    kebab.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openConvMenu(kebab, item);
+    });
+    row.appendChild(button);
+    row.appendChild(kebab);
+    list.appendChild(row);
   });
   // The list is where a fresh conversation's name first exists (its first
   // turn was just saved), so the title bar reads it from here too.
@@ -2444,6 +2563,7 @@ async function openConversation(id) {
   state.turns = data.turns;
   // The cache anchor is the most recent stored turn that touched the cache.
   state.cache.anchor = null;
+  state.cache.frozen = null;
   for (let i = data.turns.length - 1; i >= 0; i--) {
     const anchor = cacheAnchorOf(data.turns[i]);
     if (anchor) { state.cache.anchor = anchor; break; }
@@ -2525,7 +2645,7 @@ async function startNewConversation() {
   state.turns = [];
   state.selected = null;
   state.request = null;
-  state.cache = { anchor: null, lastInput: null };
+  state.cache = { anchor: null, lastInput: null, frozen: null };
   // A new conversation is the one case that starts from the model's
   // defaults: there is no last turn of its own to continue.
   await loadForm();
@@ -2600,6 +2720,16 @@ byId('send').addEventListener('click', async () => {
   streaming = true;
   byId('send').disabled = true;
   byId('send').textContent = 'Sending…';
+  // Pressing send is one of only two things that stop the countdown (the
+  // other is reaching zero): the reading freezes where it was, so the
+  // margin this send had stays visible while the answer streams. The
+  // record event starts a fresh countdown from the answer's end; an error
+  // thaws this one, because an untouched cache keeps its old clock.
+  if (state.cache.anchor && byId('cacheControl').value === 'true') {
+    const left = state.cache.anchor.at + CACHE_TTL_MS - Date.now();
+    if (left > 0) state.cache.frozen = { remaining: left };
+  }
+  renderCacheStatus();
   const turnNo = state.turns.length + 1;
   // Until the turn is recorded, the only clock it has is this page's own:
   // the moment the message was sent. The record's stamp replaces it below.
@@ -2676,6 +2806,9 @@ byId('send').addEventListener('click', async () => {
   } catch (ex) {
     body.classList.add('error');
     body.textContent = 'the request failed to reach the server: ' + ex;
+    // Never reached the provider, so the cache was never touched: thaw.
+    state.cache.frozen = null;
+    renderCacheStatus();
     finish();
     return;
   }
@@ -2750,6 +2883,10 @@ byId('send').addEventListener('click', async () => {
         showToolUse(bubble, event.record.response.server_tool_blocks);
         showSources(bubble, event.record.response.citations);
         attachMeta(body, event.record.response);
+        // The answer has landed: the freeze lifts and a fresh window starts
+        // from this moment (or keeps the old anchor if this turn never
+        // touched the cache).
+        state.cache.frozen = null;
         const anchor = cacheAnchorOf(event.record);
         if (anchor) state.cache.anchor = anchor;
         const usage = event.record.response.usage || {};
@@ -2775,6 +2912,9 @@ byId('send').addEventListener('click', async () => {
         body.textContent = event.error === 'missing_api_key'
           ? 'No Anthropic key found. Nothing was sent. Set one with: llm keys set anthropic'
           : event.error;
+        // The turn never happened, so the cache was never touched: thaw.
+        state.cache.frozen = null;
+        renderCacheStatus();
       }
     }
   }

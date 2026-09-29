@@ -246,6 +246,41 @@ def rename_conversation(thread_id: str, name: str, db: Database | None = None) -
     return {"id": thread_id, "name": cleaned}
 
 
+def delete_conversation(thread_id: str, db: Database | None = None) -> None:
+    """Remove one conversation and every turn it holds, in one transaction.
+
+    Delete order follows the foreign keys: the search index, the derived
+    per-turn tables and our sidecar all point at turns, and turns point at
+    the thread. The derived tables are schema-version dependent, so each is
+    touched only if it exists. An unknown id is a KeyError - a delete that
+    found nothing must not report itself as a delete that happened. The
+    content-addressed ``messages`` rows are llm's own and shared by design,
+    so they stay.
+    """
+    database = db or connect()
+    if not database["threads"].count_where("id = ?", [thread_id]):
+        raise KeyError(thread_id)
+    turn_ids = [
+        row["id"]
+        for row in database.query(
+            "select id from turns where thread_id = ?", [thread_id]
+        )
+    ]
+    with database.atomic():
+        for table in (
+            "turn_search",
+            "turn_fragments",
+            "turn_tools",
+            "tool_instantiations",
+        ):
+            if database[table].exists():
+                for turn_id in turn_ids:
+                    database[table].delete_where("turn_id = ?", [turn_id])
+        database[SIDECAR_TABLE].delete_where("thread_id = ?", [thread_id])
+        database["turns"].delete_where("thread_id = ?", [thread_id])
+        database["threads"].delete(thread_id)
+
+
 def thread_messages(thread_id: str, db: Database | None = None) -> list[Any]:
     """The stored message chain, exactly as it was written.
 

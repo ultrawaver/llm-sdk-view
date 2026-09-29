@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import rates_page, store, token_count
+from . import export_md, rates_page, store, token_count
 from .chat import ChatOptions, ChatSession, MissingKeyError, form_schema
 from .records import TurnRecord
 
@@ -372,6 +372,43 @@ async def rename_conversation(request: Request) -> JSONResponse:
     return JSONResponse(renamed)
 
 
+async def export_conversation(request: Request) -> Response:
+    """The whole conversation as one downloadable Markdown document.
+
+    Built from the same stored records the panes read, so what leaves the
+    app is what the app showed - the file is for sending to another AI or
+    keeping, and an unknown id is a 404 rather than an empty document.
+    """
+    conversation_id = request.path_params["id"]
+    try:
+        loaded = store.load_conversation(conversation_id)
+    except Exception as ex:  # noqa: BLE001 - read failures are not missing ids
+        return JSONResponse({"error": f"cannot read history: {ex}"}, status_code=500)
+    if loaded is None:
+        return JSONResponse({"error": "conversation not found"}, status_code=404)
+    filename = export_md.export_filename(loaded["name"], loaded["turns"])
+    return Response(
+        export_md.conversation_markdown(loaded),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": export_md.content_disposition(filename)},
+    )
+
+
+async def delete_conversation(request: Request) -> JSONResponse:
+    """Delete a conversation from llm's own database, like everything else.
+
+    The client asks twice before this is called; an unknown id is still a
+    404, because a delete that found nothing must not look like one that
+    happened.
+    """
+    conversation_id = request.path_params["id"]
+    try:
+        store.delete_conversation(conversation_id)
+    except KeyError:
+        return JSONResponse({"error": "conversation not found"}, status_code=404)
+    return JSONResponse({"deleted": conversation_id})
+
+
 async def form(request: Request) -> JSONResponse:
     """Defaults, limits and plugin capabilities for the chat form."""
     model_id = request.query_params.get("model") or ChatOptions.model
@@ -425,7 +462,9 @@ def create_app() -> Starlette:
             Route("/api/preview", preview, methods=["POST"]),
             Route("/api/conversations", conversations),
             Route("/api/conversations/{id}", conversation),
+            Route("/api/conversations/{id}", delete_conversation, methods=["DELETE"]),
             Route("/api/conversations/{id}/name", rename_conversation, methods=["POST"]),
+            Route("/api/conversations/{id}/export.md", export_conversation),
             Route("/api/rates", rates),
             Route("/health", health),
             Route("/api/version", version),

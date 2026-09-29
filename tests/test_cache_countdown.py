@@ -45,3 +45,31 @@ def test_the_anchor_reads_stamps_the_way_everything_else_does(static_page):
     the anchor by the whole timezone offset; momentOf exists precisely
     because llm's stored stamps can be that form."""
     assert "momentOf(record.timestamp)" in static_page
+
+
+def test_the_anchor_is_the_answers_end_not_the_requests_start(static_page):
+    """The documented request-start clock was measured against this
+    account's own history and lost (two hits 335.6s/338.9s after the
+    previous request started); the comment that says so must stay next to
+    the constant it justifies."""
+    assert "335.6s and 338.9s" in static_page
+    assert "the moment the answer FINISHED landing" in static_page
+
+
+def test_the_countdown_stops_only_at_zero_or_on_send(static_page):
+    """The user's rule: a running countdown has exactly two ends - it
+    reaches zero (grey), or the send key holds it where it was (frozen)."""
+    assert "state.cache.frozen = { remaining: left }" in static_page
+    assert '[data-frozen="yes"]' in static_page
+
+
+def test_a_frozen_badge_never_pulses(static_page):
+    """A held value is not urgent: the freeze dims the badge and kills the
+    animation even when the held reading was in the red."""
+    assert ".cost-ttl[data-frozen=\"yes\"] { opacity: 0.55; animation: none; }" in static_page
+
+
+def test_the_badge_says_where_it_counts_from(static_page):
+    """A number that will not name its anchor cannot be checked: the basis
+    rides on the badge as its tooltip."""
+    assert "counted from when the answer landed" in static_page

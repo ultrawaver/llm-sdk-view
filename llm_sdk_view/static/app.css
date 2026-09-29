@@ -269,6 +269,35 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .conversation small { display: block; color: var(--text-faint); font-size: 11px; margin-top: 2px; }
 
+/* A sidebar row: the conversation button plus its kebab. The kebab only
+   appears when the row is hovered or the menu it opened is alive - a
+   permanent row of ⋯ is visual noise for an action taken rarely. */
+.conv-row { position: relative; display: flex; }
+.conv-row .conversation { flex: 1; min-width: 0; }
+
+.conv-kebab {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+.conv-row:hover .conv-kebab,
+.conv-kebab:focus-visible { opacity: 1; }
+.conv-kebab:hover { background: var(--bg-hover); color: var(--text); }
+
+/* The danger step of the two-click delete. */
+.pill-menu .mi.danger { color: var(--danger); }
+.pill-menu .mi.danger .sub { color: var(--danger); opacity: 0.75; }
+
 /* --- chat title --------------------------------------------------------------- */
 
 #chatTitleBar {
@@ -1263,6 +1292,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   50% { opacity: 0.45; }
 }
 .cost-ttl[data-state="urgent"] { animation: ttl-pulse 0.9s ease-in-out infinite; }
+
+/* Frozen by the send key: the margin the send had, held still while the
+   answer streams. Dimmed so it reads as a held value, not a live one -
+   and never pulsing, because nothing here is counting down. */
+.cost-ttl[data-frozen="yes"] { opacity: 0.55; animation: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .cost-ttl[data-state="urgent"] { animation: none; }
