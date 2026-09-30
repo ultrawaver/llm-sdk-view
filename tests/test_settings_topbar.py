@@ -96,10 +96,15 @@ def test_effort_is_unsupported_for_models_without_it(static_page):
 # --- max tokens and the thinking budget floor --------------------------------
 
 
-def test_max_tokens_menu_enforces_the_thinking_budget_floor(static_page):
-    """With thinking enabled the minimum is the budget + 1 (1025 for Haiku);
-    the budget itself is never shown as a setting - it is hard-coded."""
-    assert "const min = control.min_by_thinking[thinking] || 1;" in static_page
+def test_max_tokens_menu_clamps_what_is_typed_into_it(static_page):
+    """A value below the floor or above the ceiling is corrected, not sent.
+
+    The floor itself is measured in a browser - see
+    ``test_the_max_tokens_floor_follows_the_thinking_budget`` in
+    test_topbar_in_a_browser.py. Asserting the expression here protected only
+    its wording, and it broke the moment the floor had to be read from
+    whichever provider's control was loaded.
+    """
     assert "value = Math.max(min, max ? Math.min(max, value) : value);" in static_page
     assert "the legal minimum is" in static_page
 

@@ -742,3 +742,86 @@ been sent at `xhigh` thirteen turns running. The user had changed nothing.
   no-op.
 - Entries above this one keep the paths and names the files really had at the
   time. Rewriting them would make the log claim a history it does not have.
+
+### Added: OpenRouter, as a provider in its own right
+
+- OpenRouter is a second provider, not a compatibility layer. It has its own
+  native API surface (`openai-python` against `openrouter.ai/api/v1`), its own
+  form controls, its own capability and price source, and its own two
+  transports. Nothing is expressed through Anthropic's vocabulary.
+- **Two transports, chosen per request, not per model.** `responses.create` is
+  the default and carries every control; `chat.completions.create` is selected
+  by the `chat_completions` field. The rendered code names whichever one the
+  turn will really call.
+- `native_api_chat/providers/` holds the seam: a `Provider` protocol, a
+  `Transport`, and a registry that picks the owner from the model id alone.
+  `turn.py` is the neutral module both sides read, so neither provider imports
+  the other and `chat.py` imports neither's vocabulary.
+- **The form is assembled, not unioned.** `form_schema()` builds the three
+  controls every request has - a model, a reply ceiling, a system prompt - and
+  asks the provider for the rest. A form built from both providers' fields
+  would offer the selected model controls it has never heard of, which is the
+  one thing a form must not do.
+- **A provider switcher.** Selecting a provider filters the model list to that
+  provider's own, loads that provider's controls, and hides the other's. A
+  provider with nothing to offer is still listed, with the reason: "no models
+  are available from OpenRouter" is something the user can act on, while an
+  empty list looks like a broken page.
+- Four states for an OpenRouter control, because they are four different
+  facts: editable, not taken by this model, not sent by the plugin on this
+  transport, or unknown because the catalogue could not be read. Each maps to
+  one of the shared words the page already shows; none is collapsed into
+  "disabled".
+- Capabilities and prices are read from OpenRouter's own catalogue at runtime
+  (`native_api_chat/openrouter_api.py`), cached on disk, never committed. A
+  model the catalogue does not describe gets no invented ceiling and no
+  borrowed price.
+- The default OpenRouter model is the newest standard model by publication
+  date. `:free` and `:batch` are pricing tiers and asynchronous endpoints, so
+  neither is what "just open OpenRouter" should mean, though both stay
+  selectable.
+
+### Fixed while measuring OpenRouter rather than reading it
+
+- The cache read is nested, and under a different parent on each transport
+  (`input_tokens_details` on Responses, `prompt_tokens_details` on Chat
+  Completions). Anthropic's top-level spelling found nothing and reported
+  every turn as a cache miss. `llm` strips zeros out of the details, so the
+  parent's presence is what separates "nothing was cached" from "nothing was
+  reported" - both honest, and not the same answer.
+- The Response pane's summary line read the cache figures out of the raw
+  document in Anthropic's words, so an OpenRouter turn that reported
+  `cached_tokens: 0` was summarised as "cache read unreported". The record now
+  carries the sending provider's own reading beside the document.
+- A truncated reply ends the Responses stream with `response.incomplete`,
+  which `llm` does not read: no `response_json`, no usage and no stop reason.
+  The app refuses to guess rather than reporting four missing counts as zero,
+  and the gap is written up in `docs/upstream-contributions.md` as a candidate
+  `llm` PR, since it is OpenAI's own event and affects every provider on that
+  API.
+- Anthropic's token counter was asked about OpenRouter turns. The Chat
+  Completions request carries `messages`, which is the field `count_tokens`
+  wants, so the call would have succeeded - posting an OpenRouter conversation
+  to Anthropic under the user's Anthropic key. Whether a provider has a free
+  counter to ask is now the provider's own answer.
+- `llm-openrouter` registers no models at all without a key, so llm's answer
+  on a first run was "Unknown model: openrouter/...", which sends the user
+  hunting for a typo in a correct id. The refusal now names the key.
+- A missing key surfaced as 500 on `/api/preview` and `/api/chat/stream`. All
+  three routes answer `400 missing_api_key`. Found by running a real server,
+  not the test client.
+- The pills of the unselected provider stayed on the topbar at full width:
+  `.pill { display: inline-flex }` outranks the UA stylesheet's
+  `[hidden] { display: none }`, so `hidden` reported true the whole time while
+  the computed display stayed `flex`. Measured in a browser, per AGENTS.md;
+  reading the source said it worked.
+- The Max tokens menu read `min_by_thinking`, which only Anthropic's control
+  carries, so opening that pill on an OpenRouter model threw and no menu
+  appeared - a dead control with nothing wrong in its handler.
+- The context header printed "context window 262,144 tokens · undefined":
+  OpenRouter's capability record did not carry the field the page reads, and a
+  missing key is not an empty one.
+- `tests/test_provider_switch_in_a_browser.py` measures the switch in a real
+  browser: hit tests inside each pill's own rectangle, every menu opened at
+  two widths, the row checked for pills stranded past the unscrollable start
+  edge, and uncaught page errors collected rather than assumed absent.

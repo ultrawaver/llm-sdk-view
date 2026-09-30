@@ -128,7 +128,10 @@ def test_the_anchor_is_the_answers_end_read_like_every_other_stamp(page):
             const naive = end.replace('Z', '');
             const anchor = cacheAnchorOf({
                 timestamp: naive,
-                response: { usage: { cache_read_input_tokens: 10 },
+                // `counts` is the provider's own reading of its counters;
+                // the raw document spells them per API and the page no
+                // longer reads Anthropic's names out of it.
+                response: { counts: { cache_read: 10 },
                             duration_ms: 120000 },
             });
             if (!anchor) return null;

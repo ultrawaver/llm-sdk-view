@@ -65,6 +65,10 @@
             <summary>Model &amp; limits <span class="gbadge" id="gbadgeModel"></span></summary>
             <p class="pdesc">Which model answers, and the reply's token ceiling.</p>
             <div class="controls">
+              <label>Provider
+                <select id="provider"></select>
+                <span class="notice" id="providerNote"></span>
+              </label>
               <label>Model
                 <select id="model"></select>
                 <span class="notice" id="contextWindow"></span>
@@ -124,6 +128,61 @@
               <label>Max uses
                 <input id="maxUses" type="number" value="1" min="0">
                 <span class="notice">0 = unlimited (the field is then omitted)</span>
+                <span class="notice" id="maxUsesNote"></span>
+              </label>
+            </div>
+          </details>
+          <!-- OpenRouter's own fields. Four reasoning controls because they are
+               four API fields; one slider writing to whichever seemed to fit
+               would be inventing a parameter OpenRouter does not have. Shown
+               only while an OpenRouter model is selected - the pills decide
+               that from the schema, never from a model id. -->
+          <details class="pgroup">
+            <summary>Reasoning (OpenRouter) <span class="gbadge" id="gbadgeReasoning"></span></summary>
+            <p class="pdesc">OpenRouter's reasoning object. Each field is sent
+              only when set; "default" leaves it out of the request.</p>
+            <div class="controls">
+              <label>Effort
+                <select id="reasoningEffort"></select>
+                <span class="notice" id="reasoningEffortNote"></span>
+              </label>
+              <label>Reasoning max tokens
+                <input id="reasoningMaxTokens" type="number" min="1" placeholder="default">
+                <span class="notice" id="reasoningMaxTokensNote"></span>
+              </label>
+              <label>Enabled
+                <select id="reasoningEnabled">
+                  <option value="">default</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+                <span class="notice" id="reasoningEnabledNote"></span>
+              </label>
+              <label>Summary
+                <select id="reasoningSummary"></select>
+                <span class="notice" id="reasoningSummaryNote"></span>
+              </label>
+            </div>
+          </details>
+          <details class="pgroup">
+            <summary>Transport &amp; routing (OpenRouter) <span class="gbadge" id="gbadgeRouting"></span></summary>
+            <p class="pdesc">Which OpenRouter API carries the turn, and which
+              upstream serves the model.</p>
+            <div class="controls">
+              <label>Chat Completions
+                <select id="chatCompletions">
+                  <option value="false">responses.create</option>
+                  <option value="true">chat.completions.create</option>
+                </select>
+                <span class="notice" id="chatCompletionsNote"></span>
+              </label>
+              <label>Search context size
+                <select id="searchContextSize"></select>
+                <span class="notice" id="searchContextSizeNote"></span>
+              </label>
+              <label class="wide">Provider routing (JSON)
+                <input id="routing" placeholder='e.g. {"order": ["openai"]} - left out when empty'>
+                <span class="notice" id="routingNote"></span>
               </label>
             </div>
           </details>

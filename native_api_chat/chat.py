@@ -627,7 +627,10 @@ class ChatSession:
             request_kwargs=prepared.kwargs,
             rendered_code=prepared.code,
             response=build_response_view(
-                prepared.response, ttft_ms=ttft_ms, provider=self.provider
+                prepared.response,
+                ttft_ms=ttft_ms,
+                provider=self.provider,
+                counts=self._usage,
             ),
             context=self.context().as_dict(),
         )

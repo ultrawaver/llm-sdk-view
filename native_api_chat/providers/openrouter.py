@@ -337,6 +337,33 @@ def _cached_tokens(details: dict) -> int | None:
     return None
 
 
+def _routing_from(value: Any) -> dict | None:
+    """The routing object, from a form field that can only hold text.
+
+    OpenRouter's routing is its own vocabulary - an object, not a setting -
+    and the form says so by taking it as JSON rather than offering a
+    simplified stand-in. So a string arrives here and has to be parsed.
+
+    Malformed JSON is refused rather than dropped. Dropping it would send a
+    request routed however OpenRouter felt like while the page showed the
+    routing the user typed, which is the one failure this project's panes
+    exist to make impossible.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        raise ValueError("routing must be a JSON object")
+    try:
+        parsed = json.loads(value)
+    except ValueError as ex:
+        raise ValueError(f"routing is not valid JSON: {ex}") from ex
+    if not isinstance(parsed, dict):
+        raise ValueError("routing must be a JSON object")
+    return parsed or None
+
+
 def _optional_int(value: Any) -> int | None:
     """A number the form may simply not have set.
 
@@ -592,6 +619,10 @@ class OpenRouterCapabilities:
             "name": self.name,
             "created": self.created,
             "context_window": self.context_window,
+            # The page prints this beside the figure. It was missing, and a
+            # missing key is not an empty one: the header read "context window
+            # 262,144 tokens · undefined" for every OpenRouter model.
+            "context_window_source": self.context_window_source,
             "max_output_tokens": self.max_output_tokens,
             "supported_parameters": sorted(self.supported_parameters),
             "input_modalities": list(self.input_modalities),
@@ -735,7 +766,7 @@ class OpenRouterProvider:
             web_search=bool(payload.get("web_search", False)),
             max_uses=_optional_int(payload.get("max_uses")),
             search_context_size=payload.get("search_context_size") or None,
-            routing=payload.get("routing") or None,
+            routing=_routing_from(payload.get("routing")),
         )
 
     def accept(

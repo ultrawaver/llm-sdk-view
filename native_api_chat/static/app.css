@@ -723,6 +723,15 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .pill:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 
+/* A pill belonging to the provider that is NOT selected is hidden rather than
+   removed, so that the node survives the switch and a press can survive the
+   render it sets off. `display` in the rule above outranks the UA stylesheet's
+   `[hidden] { display: none }`, so without this the other provider's four
+   pills stayed on the row at full width, offering controls the selected model
+   has never heard of. Measured, not read: `hidden` reported true the whole
+   time and the computed display was `flex`. */
+.pill[hidden] { display: none; }
+
 /* The pill is the only thing the pointer can land on. Its contents are
    rewritten whenever a value changes, and a press that landed on an inner
    span would be left holding a detached node: the browser dispatches no

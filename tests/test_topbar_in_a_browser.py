@@ -176,6 +176,27 @@ def test_a_menu_field_opens_focused_so_typing_replaces_the_value(page):
     assert page.input_value("#maxTokens") == "4096"
 
 
+def test_the_max_tokens_floor_follows_the_thinking_budget(page):
+    """With thinking on, the reply ceiling has to clear the budget.
+
+    The floor is read off whichever provider's control is loaded, so this
+    measures the attribute the field is actually given rather than the
+    expression that computes it - and it is the Anthropic rule, which is why
+    turning thinking off puts the floor back to 1.
+    """
+    page.click('[data-pill="maxTokens"]')
+    floors = {}
+    for thinking in ("on", "off"):
+        page.keyboard.press("Escape")
+        page.evaluate("(value) => setControl('thinking', value)", thinking)
+        page.click('[data-pill="maxTokens"]')
+        floors[thinking] = page.get_attribute("#pillLayer .pill-menu input", "min")
+    budget = page.evaluate("() => state.caps.budget_tokens")
+
+    assert int(floors["on"]) == budget + 1
+    assert floors["off"] == "1"
+
+
 def test_pressing_the_next_pill_commits_the_open_field_and_opens_that_pill(page):
     """The click the browser used to throw away.
 

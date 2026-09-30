@@ -44,9 +44,12 @@ const TTL_WARN_MS = 60 * 1000;
 const TTL_URGENT_MS = 30 * 1000;
 
 function cacheTouchOf(response) {
-  const usage = (response && response.usage) || {};
-  const read = usage.cache_read_input_tokens;
-  const write = usage.cache_creation_input_tokens;
+  // `counts`, not `usage`: the raw document spells these differently on every
+  // API, and reading Anthropic's names out of another provider's finds
+  // nothing - which looks exactly like a turn that missed the cache.
+  const counts = (response && response.counts) || {};
+  const read = counts.cache_read;
+  const write = counts.cache_creation;
   // A read is the more interesting event (it means the cache paid off), so
   // it wins when a turn both read and extended the entry.
   if (typeof read === 'number' && read > 0) return { kind: 'read', tokens: read };
@@ -122,6 +125,14 @@ function renderCacheStatus() {
     stateEl.dataset.state = face || 'idle';
     if (noteEl) noteEl.textContent = note;
   };
+  // The cache readout describes Anthropic's prompt cache. OpenRouter caches
+  // per upstream and reports only a read count, with no cache write count and
+  // no TTL to run down, so this ladder has nothing to measure there - and
+  // "cache off" would be a claim about a control its form does not carry.
+  if (providerId() !== 'anthropic') {
+    say('no cache control', 'Prompt caching is not a parameter on this provider.');
+    return;
+  }
   if (byId('cacheControl').value !== 'true') {
     say('cache off', 'Prompt cache is off — every turn pays the full input price.');
     return;
@@ -792,7 +803,72 @@ function thinkingStateName(value) {
   return state.caps && state.caps.thinking_mode === 'adaptive' ? 'Adaptive' : 'Enabled';
 }
 
+/* A control's value when the form does not offer it, in the words the server
+   greys it out with. Read from the schema, never decided here: which of the
+   four reasons a control is refused for is a capability decision, and a page
+   that worked it out itself would be a second answer to it. */
+function controlOf(id) {
+  return (state.data && state.data.controls && state.data.controls[id]) || null;
+}
+
+function isEditable(id) {
+  const control = controlOf(id);
+  return !!control && control.status === 'Editable';
+}
+
+/* Why a control cannot be used, as the menu's own note. */
+function refusalNote(id) {
+  const control = controlOf(id);
+  if (!control || control.status === 'Editable') return '';
+  return control.status + (control.unavailable_note ? ' · ' + control.unavailable_note : '');
+}
+
+/* A menu row for one field of a multi-field control, disabled with its reason
+   showing when the provider will not carry it. */
+function menuField(host, { id, label, control, html, hint }) {
+  const editable = isEditable(control === undefined ? id : control);
+  const note = editable ? (hint || '') : refusalNote(control === undefined ? id : control);
+  const field = document.createElement('div');
+  field.className = 'field';
+  field.innerHTML = '<label>' + esc(label) + '</label>' + html(editable)
+    + (note ? '<div class="hint">' + esc(note) + '</div>' : '');
+  host.appendChild(field);
+  return field;
+}
+
 const PILL_DEFS = [
+  {
+    id: 'provider', label: 'Provider',
+    value: () => (state.data.provider && state.data.provider.label) || '—',
+    menu: (menu) => {
+      menuHead(menu, 'Provider');
+      const current = providerId();
+      (state.data.provider.options || []).forEach((option) => {
+        menuItem(menu, {
+          label: option.label,
+          sub: option.available
+            ? option.models + (option.models === 1 ? ' model' : ' models')
+            : option.unavailable_note,
+          selected: option.id === current,
+          disabled: !option.available,
+          // Switching provider means switching model: the model is the only
+          // thing that decides who sends a turn, so everything else follows
+          // from the new schema. It goes through loadForm rather than
+          // setControl because the model list is still the old provider's and
+          // a <select> refuses a value it has no option for - the switch
+          // would land back on the provider it came from.
+          onPick: () => {
+            closePillMenu();
+            if (option.available && option.id !== current) {
+              loadForm(option.default_model);
+            }
+          }
+        });
+      });
+      menuNote(menu, 'Each provider has its own API, its own models and its '
+        + 'own controls. Switching one switches all three.');
+    }
+  },
   {
     id: 'model', label: 'Model',
     value: () => {
@@ -823,7 +899,7 @@ const PILL_DEFS = [
     }
   },
   {
-    id: 'thinking', label: 'Thinking',
+    id: 'thinking', label: 'Thinking', provider: 'anthropic',
     fixed: () => state.caps && !state.caps.thinking_editable,
     fixedValue: () => cap1(state.caps.thinking_mode),
     fixedTag: () => 'always on',
@@ -855,7 +931,7 @@ const PILL_DEFS = [
     }
   },
   {
-    id: 'effort', label: 'Effort',
+    id: 'effort', label: 'Effort', provider: 'anthropic',
     unsupported: () => state.caps && !state.caps.supports_effort,
     value: () => {
       const value = byId('effort').value;
@@ -893,8 +969,14 @@ const PILL_DEFS = [
       + '<span class="sub-max">/' + fmtLimit(state.caps ? state.caps.max_output_tokens : null) + '</span>',
     menu: (menu) => {
       const control = state.data.controls.max_tokens;
-      const thinking = byId('thinking').value;
-      const min = control.min_by_thinking[thinking] || 1;
+      // `min_by_thinking` is Anthropic's alone: only its ceiling has to clear
+      // a thinking budget. The shared control carries a plain `min`, so
+      // reading the Anthropic shape unconditionally threw the moment this
+      // pill was opened on an OpenRouter model - and a pill that throws
+      // opens no menu at all, which is a dead control with nothing wrong in
+      // the handler.
+      const byThinking = control.min_by_thinking;
+      const min = (byThinking && byThinking[byId('thinking').value]) || control.min || 1;
       const max = state.caps.max_output_tokens;
       menuHead(menu, 'Max output tokens');
       const field = document.createElement('div');
@@ -903,8 +985,9 @@ const PILL_DEFS = [
         + '<input type="number" min="' + min + '" max="' + (max || '') + '" value="'
         + esc(byId('maxTokens').value) + '">'
         + '<div class="hint">' + esc(control.note)
-        + (min > 1 ? ' · with thinking enabled the legal minimum is ' + fmt(min)
-          + ' (above the ' + fmt(state.caps.budget_tokens) + ' budget)' : '')
+        + (byThinking && min > 1
+          ? ' · with thinking enabled the legal minimum is ' + fmt(min)
+            + ' (above the ' + fmt(state.caps.budget_tokens) + ' budget)' : '')
         + '</div>';
       menu.appendChild(field);
       const input = field.querySelector('input');
@@ -941,7 +1024,7 @@ const PILL_DEFS = [
     }
   },
   {
-    id: 'webSearch', label: 'Web Search',
+    id: 'webSearch', label: 'Web Search', provider: 'anthropic',
     value: () => byId('webSearch').value === 'true' ? 'On' : 'Off',
     menu: (menu) => {
       const on = byId('webSearch').value === 'true';
@@ -985,7 +1068,7 @@ const PILL_DEFS = [
     }
   },
   {
-    id: 'cacheControl', label: 'Caching',
+    id: 'cacheControl', label: 'Caching', provider: 'anthropic',
     value: () => byId('cacheControl').value === 'true' ? '5m' : 'Off',
     menu: (menu) => {
       const on = byId('cacheControl').value === 'true';
@@ -1002,6 +1085,137 @@ const PILL_DEFS = [
     }
   },
   {
+    id: 'reasoning', label: 'Reasoning', provider: 'openrouter',
+    // Four API fields, so four rows that each write their own. The pill reads
+    // the effort because that is the one most turns set; it is a reading of
+    // one field, not a summary of four.
+    value: () => {
+      const effort = byId('reasoningEffort').value;
+      const parts = [];
+      if (effort && effort !== OMITTED) parts.push(effort);
+      if (byId('reasoningMaxTokens').value) parts.push(fmt(byId('reasoningMaxTokens').value) + ' tok');
+      if (byId('reasoningEnabled').value) parts.push('enabled=' + byId('reasoningEnabled').value);
+      if (byId('reasoningSummary').value && byId('reasoningSummary').value !== OMITTED) {
+        parts.push(byId('reasoningSummary').value);
+      }
+      return parts.length ? parts.join(' · ') : 'Default';
+    },
+    menu: (menu) => {
+      menuHead(menu, 'Reasoning · ' + shortModelName(byId('model').value));
+      const fields = document.createElement('div');
+      menuField(fields, {
+        id: 'reasoning_effort', label: 'Effort · reasoning.effort',
+        hint: 'default leaves the field out of the request',
+        html: (on) => selectHtml('menuEffort', optionValues('reasoning_effort'),
+                                 byId('reasoningEffort').value, on)
+      });
+      menuField(fields, {
+        id: 'reasoning_max_tokens', label: 'Max tokens · reasoning.max_tokens',
+        hint: 'empty leaves the field out',
+        html: (on) => '<input type="number" id="menuReasoningTokens" min="1"'
+          + ' placeholder="default" value="' + esc(byId('reasoningMaxTokens').value) + '"'
+          + (on ? '' : ' disabled') + '>'
+      });
+      menuField(fields, {
+        id: 'reasoning_enabled', label: 'Enabled · reasoning.enabled',
+        hint: 'three states: off is a request, untouched is not',
+        html: (on) => selectHtml('menuReasoningEnabled',
+          [{ value: '', label: 'default' }, { value: 'true', label: 'true' },
+           { value: 'false', label: 'false' }],
+          byId('reasoningEnabled').value, on)
+      });
+      menuField(fields, {
+        id: 'reasoning_summary', label: 'Summary · reasoning.summary',
+        html: (on) => selectHtml('menuReasoningSummary',
+                                 optionValues('reasoning_summary'),
+                                 byId('reasoningSummary').value, on)
+      });
+      menu.appendChild(fields);
+      wireMenuField(fields, '#menuEffort', 'reasoningEffort');
+      wireMenuField(fields, '#menuReasoningTokens', 'reasoningMaxTokens');
+      wireMenuField(fields, '#menuReasoningEnabled', 'reasoningEnabled');
+      wireMenuField(fields, '#menuReasoningSummary', 'reasoningSummary');
+    }
+  },
+  {
+    id: 'orWebSearch', label: 'Web Search', provider: 'openrouter',
+    value: () => byId('webSearch').value === 'true' ? 'On' : 'Off',
+    menu: (menu) => {
+      const on = byId('webSearch').value === 'true';
+      menuHead(menu, 'Web search');
+      const editable = isEditable('web_search');
+      const toggle = document.createElement('button');
+      toggle.className = 'mi' + (editable ? '' : ' disabled');
+      toggle.innerHTML = '<span class="grow">Enabled'
+        + (editable ? '' : '<span class="sub">' + esc(refusalNote('web_search')) + '</span>')
+        + '</span><span class="switch' + (on ? ' on' : '') + '" role="switch"'
+        + ' aria-checked="' + on + '"><span class="knob"></span></span>';
+      if (editable) {
+        toggle.addEventListener('click', () => {
+          closePillMenu();
+          setControl('webSearch', on ? 'false' : 'true');
+        });
+      }
+      menu.appendChild(toggle);
+      const fields = document.createElement('div');
+      menuField(fields, {
+        id: 'max_uses', control: 'web_search', label: 'Max uses',
+        hint: 'empty leaves the field out',
+        html: (ok) => '<input type="number" id="menuOrMaxUses" min="1" placeholder="default"'
+          + ' value="' + esc(byId('maxUses').value) + '"' + (ok ? '' : ' disabled') + '>'
+      });
+      menuField(fields, {
+        id: 'search_context_size', control: 'web_search',
+        label: 'Search context size',
+        html: (ok) => selectHtml('menuSearchContext',
+                                 optionValues('search_context_size'),
+                                 byId('searchContextSize').value, ok)
+      });
+      menu.appendChild(fields);
+      wireMenuField(fields, '#menuOrMaxUses', 'maxUses');
+      wireMenuField(fields, '#menuSearchContext', 'searchContextSize');
+      menuNote(menu, esc(state.data.controls.web_search.note || ''));
+    }
+  },
+  {
+    id: 'transport', label: 'Transport', provider: 'openrouter',
+    value: () => byId('chatCompletions').value === 'true'
+      ? 'chat.completions' : 'responses',
+    menu: (menu) => {
+      menuHead(menu, 'OpenRouter API');
+      const chat = byId('chatCompletions').value === 'true';
+      menuItem(menu, {
+        label: 'responses.create', sub: 'the newer API · carries every control',
+        selected: !chat,
+        onPick: () => { closePillMenu(); setControl('chatCompletions', 'false'); }
+      });
+      menuItem(menu, {
+        label: 'chat.completions.create',
+        sub: 'no server tools, and no reasoning summary',
+        selected: chat,
+        onPick: () => { closePillMenu(); setControl('chatCompletions', 'true'); }
+      });
+      menuNote(menu, esc(state.data.controls.chat_completions.note || ''));
+    }
+  },
+  {
+    id: 'routing', label: 'Routing', provider: 'openrouter',
+    value: () => byId('routing').value ? 'Set' : 'Default',
+    menu: (menu) => {
+      menuHead(menu, 'Provider routing');
+      const fields = document.createElement('div');
+      menuField(fields, {
+        id: 'routing', label: 'provider (JSON)',
+        hint: 'OpenRouter\'s own object · empty leaves it out',
+        html: (on) => '<input type="text" id="menuRouting" placeholder=\'{"order": ["openai"]}\''
+          + ' value="' + esc(byId('routing').value) + '"' + (on ? '' : ' disabled') + '>'
+      });
+      menu.appendChild(fields);
+      wireMenuField(fields, '#menuRouting', 'routing');
+      menuNote(menu, esc(state.data.controls.routing.note || ''));
+    }
+  },
+  {
     id: 'streaming', label: 'Streaming',
     fixed: () => true,
     fixedValue: () => 'On',
@@ -1011,6 +1225,38 @@ const PILL_DEFS = [
     menu: null
   }
 ];
+
+/* "Leave this field out", in the word the server uses for it. */
+const OMITTED = 'default';
+
+/* The values a schema control offers, as {value,label} rows. */
+function optionValues(id) {
+  const control = controlOf(id);
+  return ((control && control.options) || []).map((option) => ({
+    value: option.value === OMITTED ? OMITTED : option.value,
+    label: option.value
+  }));
+}
+
+function selectHtml(id, options, current, enabled) {
+  return '<select id="' + id + '"' + (enabled ? '' : ' disabled') + '>'
+    + options.map((option) => '<option value="' + esc(option.value) + '"'
+        + (String(current) === String(option.value) ? ' selected' : '') + '>'
+        + esc(option.label) + '</option>').join('')
+    + '</select>';
+}
+
+/* Commit a menu field back to the hidden control that owns the value.
+
+   The hidden controls are the single source the payload, the validation and
+   the preview all read, so a menu field that kept its own value would be a
+   second one. Disabled fields are not wired at all: a refused control must
+   not be able to change what is sent. */
+function wireMenuField(host, selector, controlId) {
+  const field = host.querySelector(selector);
+  if (!field || field.disabled) return;
+  field.addEventListener('change', () => setControl(controlId, field.value));
+}
 
 /* The row is built once and updated in place.
 
@@ -1057,6 +1303,18 @@ function renderPills() {
   if (!host || !state.data) return;
   PILL_DEFS.forEach((def) => {
     const pill = pillNode(def);
+    // A pill for a control the selected provider does not have is hidden, not
+    // removed: the nodes outlive every render on purpose, because detaching
+    // one mid-gesture is how a pill ends up dead. Hiding is also why the
+    // provider's own pills can be missing from the schema without this
+    // reaching into controls that are not there.
+    const mine = !def.provider || def.provider === providerId();
+    pill.hidden = !mine;
+    if (!mine) {
+      if (pillMenu && pillMenu.id === def.id) closePillMenu();
+      if (pill.parentElement !== host) host.appendChild(pill);
+      return;
+    }
     const fixed = def.fixed && def.fixed();
     const unsupported = def.unsupported && def.unsupported();
     pill.className = 'pill' + (fixed ? ' fixed' : '') + (unsupported ? ' unsupported' : '');
@@ -1689,14 +1947,7 @@ function currentFormOptions() {
     model: byId('model').value,
     max_tokens: Number(byId('maxTokens').value),
     system: byId('system').value,
-    thinking: byId('thinking').value,
-    effort: byId('effort').value,
-    web_search: byId('webSearch').value === 'true',
-    web_search_type: byId('webSearchType').value,
-    allowed_callers: byId('allowedCallers').value,
-    response_inclusion: byId('responseInclusion').value,
-    max_uses: Number(byId('maxUses').value),
-    cache_control: byId('cacheControl').value === 'true'
+    ...providerFields()
   };
 }
 
@@ -1868,6 +2119,13 @@ function updateCacheWarn() {
   // about this form that nothing has withdrawn, and reading the DOM then
   // shows a warning the page is not making.
   const hide = () => { el.hidden = true; text.textContent = ''; };
+  // Prompt caching is an Anthropic parameter. "The prompt cache is off" is a
+  // claim about a control OpenRouter's form does not carry, and a warning
+  // about a field nobody can set is noise the user cannot act on.
+  if (providerId() !== 'anthropic') {
+    hide();
+    return;
+  }
   const last = state.turns[state.turns.length - 1];
   const lastOptions = last && last.options;
   if (!lastOptions || !Object.keys(lastOptions).length) {
@@ -1920,6 +2178,22 @@ function payload(text) {
     model: byId('model').value,
     max_tokens: Number(byId('maxTokens').value),
     system: byId('system').value,
+    ...providerFields()
+  };
+}
+
+/* Which form fields belong to which provider.
+
+   The server reads only the selected provider's fields, and sending the other
+   provider's alongside them is the same mistake the schema refuses to make:
+   a request carrying a control the model has never heard of. It is also not
+   harmless - an empty number field reads as 0, and 0 is a value one of these
+   APIs rejects rather than ignores.
+
+   Absence is how a default is expressed throughout, so an untouched field is
+   left out rather than sent empty. */
+const PROVIDER_FIELDS = {
+  anthropic: () => ({
     thinking: byId('thinking').value,
     effort: byId('effort').value,
     web_search: byId('webSearch').value === 'true',
@@ -1928,7 +2202,30 @@ function payload(text) {
     response_inclusion: byId('responseInclusion').value,
     max_uses: Number(byId('maxUses').value),
     cache_control: byId('cacheControl').value === 'true'
-  };
+  }),
+  openrouter: () => ({
+    chat_completions: byId('chatCompletions').value === 'true',
+    reasoning_effort: byId('reasoningEffort').value,
+    reasoning_max_tokens: byId('reasoningMaxTokens').value,
+    reasoning_enabled: byId('reasoningEnabled').value,
+    reasoning_summary: byId('reasoningSummary').value,
+    web_search: byId('webSearch').value === 'true',
+    max_uses: byId('maxUses').value,
+    search_context_size: byId('searchContextSize').value,
+    routing: byId('routing').value
+  })
+};
+
+/* The provider the loaded schema belongs to. Read off the schema rather than
+   parsed out of the model id: deciding it here would be a second answer to a
+   question the server has already answered, and the two could disagree. */
+function providerId() {
+  return (state.data && state.data.provider && state.data.provider.id) || 'anthropic';
+}
+
+function providerFields() {
+  const build = PROVIDER_FIELDS[providerId()];
+  return build ? build() : {};
 }
 
 function setOptions(select, options, labels) {
@@ -2256,7 +2553,22 @@ function renderPane() {
 }
 
 function refresh() {
-  const caps = state.caps;
+  // Nothing blocks an OpenRouter turn from here: its refusals are the
+  // provider's own and were settled when the schema was built, so a control
+  // that cannot be sent is already greyed out with its reason on it. The
+  // checks below are all about Anthropic's web search tool.
+  if (providerId() === 'openrouter') {
+    byId('maxUses').disabled = !isEditable('web_search');
+    byId('searchContextSize').disabled = !isEditable('web_search');
+    state.blocked = false;
+    setBlocked('');
+    byId('send').disabled = state.fits === false;
+    syncSwitches();
+    renderPills();
+    updateCacheWarn();
+    renderCacheStatus();
+    return;
+  }
   const on = byId('webSearch').value === 'true';
   ['webSearchType', 'allowedCallers', 'responseInclusion', 'maxUses'].forEach(
     (id) => { byId(id).disabled = !on; }
@@ -2288,6 +2600,10 @@ function refresh() {
 }
 
 function apply(data) {
+  // Read before the schema is replaced: a switch has to be noticed here,
+  // because the fields both forms carry are the ones that can keep the other
+  // provider's answer and still look like this provider's default.
+  const switched = !state.data || state.data.provider.id !== data.provider.id;
   state.data = data;
   const caps = data.capabilities;
   state.caps = caps;
@@ -2298,17 +2614,99 @@ function apply(data) {
   byId('maxTokens').max = caps.max_output_tokens || '';
   byId('maxTokens').value = data.defaults.max_tokens;
 
-  setNote('ttlNote', data.controls.cache_control.ttl.status,
-    data.controls.cache_control.ttl.value + ' · ' + data.controls.cache_control.ttl.note);
+  applyProviderChoices(data);
 
-  // Streaming is not a choice here: llm-anthropic always opens a stream.
+  // Web search and its use limit are the only two controls both APIs have, so
+  // they are the only two a switch can strand. They are reset from the new
+  // schema's own defaults rather than carried over: "on" on one provider is
+  // not a choice the user made about the other. A model change within one
+  // provider leaves them alone, the same way it leaves the system prompt.
+  if (switched) {
+    byId('webSearch').value = String(data.defaults.web_search);
+    byId('maxUses').value = data.defaults.max_uses == null ? '' : data.defaults.max_uses;
+  }
+
+  // Streaming is not a choice here: both plugins always open a stream.
   const streamControl = data.controls.stream;
   setOptions(byId('stream'), streamControl.options, {
-    ON: 'ON', OFF: 'OFF (API supported · not used by llm-anthropic)'
+    ON: 'ON', OFF: 'OFF (' + (streamControl.options[1] || {}).note + ')'
   });
   byId('stream').value = 'ON';
   byId('stream').disabled = true;
   setNote('streamNote', streamControl.status, streamControl.note);
+  groupBadge('gbadgeModel', [data.controls.max_tokens.status]);
+  groupBadge('gbadgeTransport', [streamControl.status]);
+
+  // Each provider's own controls, and only the selected one's: reaching for
+  // a control the schema does not carry is how the page died on the first
+  // OpenRouter model it was given.
+  if (providerId() === 'openrouter') applyOpenRouter(data);
+  else applyAnthropic(data, caps);
+
+  showContext(data.context);
+  // Kept so a brand-new conversation can put the meter back to "nothing
+  // carries anything yet" instead of leaving the old conversation's total.
+  state.formContext = data.context;
+  refresh();
+  schedulePreview();
+}
+
+/* The switcher's own control, and what it says about a provider with nothing
+   to offer. Kept out of the pill so the hidden value store stays the one
+   place a value lives. */
+function applyProviderChoices(data) {
+  const options = (data.provider && data.provider.options) || [];
+  const labels = {};
+  options.forEach((option) => {
+    labels[option.id] = option.label
+      + (option.available ? ' (' + option.models + ')' : ' — no models');
+  });
+  setOptions(byId('provider'),
+    options.map((option) => ({ value: option.id, disabled: !option.available })),
+    labels);
+  byId('provider').value = providerId();
+  const unavailable = options.filter((option) => !option.available);
+  setNote('providerNote', 'Editable', unavailable.length
+    ? unavailable.map((option) => option.unavailable_note).join(' · ')
+    : 'each provider has its own API, models and controls');
+}
+
+function applyOpenRouter(data) {
+  const controls = data.controls;
+  [['reasoningEffort', 'reasoning_effort'],
+   ['reasoningSummary', 'reasoning_summary'],
+   ['searchContextSize', 'search_context_size']].forEach(([id, key]) => {
+    setOptions(byId(id), controls[key].options || [], {});
+    byId(id).value = controls[key].value == null ? '' : controls[key].value;
+    byId(id).disabled = controls[key].status !== 'Editable';
+    setNote(id + 'Note', controls[key].status,
+      controls[key].unavailable_note || controls[key].note);
+  });
+  [['reasoningMaxTokens', 'reasoning_max_tokens'],
+   ['reasoningEnabled', 'reasoning_enabled'],
+   ['routing', 'routing'],
+   ['chatCompletions', 'chat_completions']].forEach(([id, key]) => {
+    const value = data.defaults[key];
+    byId(id).value = value == null ? '' : String(value);
+    byId(id).disabled = controls[key].status !== 'Editable';
+    setNote(id + 'Note', controls[key].status,
+      controls[key].unavailable_note || controls[key].note);
+  });
+  // OpenRouter's search tool has no version to derive and no caller to fix,
+  // so max_uses is the only field beside the switch that turns the tool on.
+  byId('maxUses').disabled = controls.max_uses.status !== 'Editable';
+  setNote('maxUsesNote', controls.max_uses.status, controls.max_uses.note);
+  groupBadge('gbadgeReasoning', [controls.reasoning_effort.status,
+    controls.reasoning_max_tokens.status, controls.reasoning_enabled.status,
+    controls.reasoning_summary.status]);
+  groupBadge('gbadgeRouting', [controls.chat_completions.status,
+    controls.routing.status, controls.search_context_size.status]);
+  groupBadge('gbadgeSearch', [controls.web_search.status]);
+}
+
+function applyAnthropic(data, caps) {
+  setNote('ttlNote', data.controls.cache_control.ttl.status,
+    data.controls.cache_control.ttl.value + ' · ' + data.controls.cache_control.ttl.note);
 
   // Thinking: its own control, with the official mode and default state.
   const thinkingControl = data.controls.thinking;
@@ -2344,19 +2742,10 @@ function apply(data) {
   const inclusion = data.controls.response_inclusion;
   setNote('responseInclusionNote', inclusion.status, inclusion.note);
 
-  groupBadge('gbadgeModel', [data.controls.max_tokens.status]);
   groupBadge('gbadgeThinking', [thinkingControl.status,
     data.controls.budget_tokens.status, data.controls.effort.status]);
   groupBadge('gbadgeSearch', [typeControl.status, callerControl.status, inclusion.status]);
   groupBadge('gbadgeCache', [data.controls.cache_control.ttl.status]);
-  groupBadge('gbadgeTransport', [streamControl.status]);
-
-  showContext(data.context);
-  // Kept so a brand-new conversation can put the meter back to "nothing
-  // carries anything yet" instead of leaving the old conversation's total.
-  state.formContext = data.context;
-  refresh();
-  schedulePreview();
 }
 
 /* --- panels, tabs, copy, keyboard ------------------------------------------ */
@@ -2855,8 +3244,16 @@ async function startNewConversation() {
 
 byId('newConversation').addEventListener('click', startNewConversation);
 
-async function loadForm() {
-  const model = byId('model').value;
+/* The form for one model, and the model list of whoever owns it.
+
+   `requested` is for a model the select cannot hold yet - the provider
+   switcher picks the other provider's default, and that id is not in a list
+   built from this provider's catalogue. A <select> silently refuses a value
+   it has no option for, so asking the server first and rebuilding the list
+   from the answer is the only order that works; setting the control first
+   would leave the value empty and reload the provider we came from. */
+async function loadForm(requested) {
+  const model = requested || byId('model').value;
   const query = model ? '?model=' + encodeURIComponent(model) : '';
   const response = await fetch('/api/form' + query);
   const data = await response.json();
@@ -2865,10 +3262,20 @@ async function loadForm() {
     byId('send').disabled = true;
     return;
   }
-  if (!byId('model').options.length) {
-    setOptions(byId('model'), data.models.map((value) => ({value})), {});
-    byId('model').value = data.model.id;
+  // The list is the selected provider's, so it is rebuilt whenever the schema
+  // changes hands. Offering both providers' models at once would put a model
+  // in the list that the loaded controls do not belong to.
+  const select = byId('model');
+  const mine = new Set(data.models);
+  const stale = Array.from(select.options).some((option) => !mine.has(option.value)
+    && !option.dataset.superseded);
+  if (!select.options.length || stale) {
+    setOptions(select, data.models.map((value) => ({value})), {});
   }
+  // Rebuilding drops the marked option a stored conversation added, and the
+  // model the schema was just built for has to stay selectable either way.
+  ensureModelOption(data.model.id);
+  select.value = data.model.id;
   apply(data);
 }
 
@@ -2880,19 +3287,35 @@ byId('thinking').addEventListener('change', () => {
   applyThinkingState();
   refresh();
 });
-byId('model').addEventListener('change', loadForm);
+// Called with no argument on purpose: loadForm's parameter is a model id, and
+// handing a listener straight to it would pass the Event as the model.
+byId('model').addEventListener('change', () => loadForm());
+// The hidden select is the value store behind the provider pill, so a write to
+// it switches provider the same way the pill does - which is also how a test
+// drives the switch without going through a menu.
+byId('provider').addEventListener('change', () => {
+  const chosen = (state.data.provider.options || [])
+    .find((option) => option.id === byId('provider').value);
+  if (chosen && chosen.available && chosen.id !== providerId()) {
+    loadForm(chosen.default_model);
+  }
+});
 
 // Any change to the form rebuilds the preview, so the right pane always
 // answers "what would Send put on the wire" before it costs anything.
 ['model', 'thinking', 'effort', 'webSearch', 'webSearchType', 'allowedCallers',
- 'responseInclusion', 'maxUses', 'cacheControl', 'system', 'maxTokens', 'prompt'
+ 'responseInclusion', 'maxUses', 'cacheControl', 'system', 'maxTokens', 'prompt',
+ 'chatCompletions', 'reasoningEffort', 'reasoningMaxTokens', 'reasoningEnabled',
+ 'reasoningSummary', 'searchContextSize', 'routing'
 ].forEach((id) => {
   byId(id).addEventListener('change', schedulePreview);
   byId(id).addEventListener('input', schedulePreview);
 });
 // The pills mirror the same controls, so they re-render on the same changes
 // (apply()/refresh() cover the rest).
-['effort', 'maxTokens', 'system', 'cacheControl', 'maxUses', 'responseInclusion'
+['effort', 'maxTokens', 'system', 'cacheControl', 'maxUses', 'responseInclusion',
+ 'chatCompletions', 'reasoningEffort', 'reasoningMaxTokens', 'reasoningEnabled',
+ 'reasoningSummary', 'searchContextSize', 'routing'
 ].forEach((id) => {
   byId(id).addEventListener('change', renderPills);
   byId(id).addEventListener('change', updateCacheWarn);

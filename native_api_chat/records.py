@@ -156,13 +156,30 @@ def format_duration(duration_ms: int | None) -> str | None:
     return f"{duration_ms / 1000:.2f} s"
 
 
-def usage_summary(usage: dict) -> str:
-    """One line: what this turn cost, including cache and search."""
+def usage_summary(usage: dict, counts: dict | None = None) -> str:
+    """One line: what this turn cost, including cache and search.
+
+    The cache figures come from ``counts`` - the sending provider's own
+    reading - rather than from the raw document, because only the provider
+    knows where its API puts them. OpenRouter nests the read one level down
+    and under a different parent per transport, so Anthropic's spelling found
+    nothing and reported "unreported" for a turn that reported 0.
+    """
+    if counts:
+        creation = counts.get("cache_creation")
+        read = counts.get("cache_read")
+    else:
+        # A record stored before the counters were read per provider. Every
+        # one of those is an Anthropic turn, so its figures really are in the
+        # document under Anthropic's own names - this is the stored shape,
+        # not a guess at an unknown one.
+        creation = usage.get("cache_creation_input_tokens")
+        read = usage.get("cache_read_input_tokens")
     parts = [
         f"input {_fmt_number(usage.get('input_tokens'))}",
         f"output {_fmt_number(usage.get('output_tokens'))}",
-        f"cache creation {_fmt_number(usage.get('cache_creation_input_tokens'))}",
-        f"cache read {_fmt_number(usage.get('cache_read_input_tokens'))}",
+        f"cache creation {_fmt_number(creation)}",
+        f"cache read {_fmt_number(read)}",
         f"web searches {_fmt_number(usage.get('web_search_requests'))}",
     ]
     return " · ".join(parts)
@@ -266,6 +283,13 @@ class ResponseView:
     stop_reason: str | None
     usage: dict
     response_json: dict | None
+    # The same counters, read by the provider that sent the turn and reduced
+    # to this app's four names. ``usage`` above is the provider's own
+    # document, which is what the Response pane shows; a figure is read from
+    # here, because "the cache read" is spelt differently on every API - and
+    # is nested on both OpenRouter paths, where Anthropic's spelling finds
+    # nothing and every turn reads as a cache miss.
+    counts: dict = field(default_factory=dict)
     # Client-side latency. duration_ms is llm's own measurement (dispatch to
     # stream end); ttft_ms is this app's time to the first text chunk.
     # Older stored records predate both, so None means "not measured".
@@ -273,7 +297,7 @@ class ResponseView:
     ttft_ms: int | None = None
 
     def summary(self) -> str:
-        return usage_summary(self.usage)
+        return usage_summary(self.usage, self.counts)
 
     def latency_summary(self) -> str | None:
         duration = format_duration(self.duration_ms)
@@ -313,6 +337,7 @@ class ResponseView:
             "server_tool_blocks": self.server_tool_blocks,
             "stop_reason": self.stop_reason,
             "usage": self.usage,
+            "counts": self.counts,
             "summary": self.summary(),
             "response_json": self.response_json,
             "duration_ms": self.duration_ms,
@@ -338,6 +363,7 @@ class ResponseView:
             server_tool_blocks=data.get("server_tool_blocks") or [],
             stop_reason=data.get("stop_reason"),
             usage=data.get("usage") or {},
+            counts=data.get("counts") or {},
             response_json=data.get("response_json"),
             duration_ms=data.get("duration_ms"),
             ttft_ms=data.get("ttft_ms"),
@@ -345,7 +371,10 @@ class ResponseView:
 
 
 def build_response_view(
-    response: Any, ttft_ms: int | None = None, provider: Any = None
+    response: Any,
+    ttft_ms: int | None = None,
+    provider: Any = None,
+    counts: dict | None = None,
 ) -> ResponseView:
     """Read the Answer off the Message the SDK finished with.
 
@@ -356,6 +385,10 @@ def build_response_view(
     that Message whose shape differs between providers. Without it the
     Anthropic shape is assumed: right for Anthropic, and on either OpenRouter
     path it finds no text and no stop reason at all.
+
+    ``counts`` is that provider's reading of its own counters, passed in
+    rather than read again here: the session has already asked for it, and a
+    second reading is a second answer that can disagree with the first.
     """
     message = getattr(response, "response_json", None) or {}
     blocks = provider.blocks(message) if provider else _as_blocks(message)
@@ -376,6 +409,7 @@ def build_response_view(
         server_tool_blocks=_server_tool_blocks(blocks),
         stop_reason=stop_reason,
         usage=_usage(response, message),
+        counts=counts or {},
         response_json=message or None,
         duration_ms=_duration_ms(response),
         ttft_ms=ttft_ms,

@@ -153,6 +153,30 @@ def test_no_cache_hits_and_no_cache_report_are_different_answers(session):
     assert said_nothing.baseline_usage["cache_read"] is None
 
 
+def test_the_summary_line_reads_the_cache_from_the_provider_that_sent_it(session):
+    """The Response pane's own sentence, and it was Anthropic's vocabulary.
+
+    A turn that reported ``cached_tokens: 0`` was summarised as "cache read
+    unreported", because the summary looked for Anthropic's top-level name in
+    OpenRouter's document. The raw usage is still the provider's document;
+    the figures now come from the provider's own reading of it.
+    """
+    record = session(
+        usage={
+            "input_tokens": 21,
+            "output_tokens": 30,
+            "input_tokens_details": {"cached_tokens": 0},
+        }
+    ).run_turn("hello")["record"]
+
+    assert record["response"]["summary"] == (
+        "input 21 · output 30 · cache creation unreported · cache read 0"
+        " · web searches unreported"
+    )
+    # And the document is untouched: the pane shows what OpenRouter sent.
+    assert record["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
+
+
 def test_a_cache_write_is_unknown_rather_than_inferred(session):
     """OpenRouter prices a cache write for some models and reports none here.
     Deriving one from the read would invent the more expensive half."""
