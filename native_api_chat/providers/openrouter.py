@@ -162,11 +162,14 @@ OMITTED = "default"
 
 SEARCH_CONTEXT_SIZES = ("low", "medium", "high")
 
-# Options the Responses path refuses outright, quoted from the plugin:
-# "The OpenRouter Responses API does not support these options: ...". It
-# raises rather than dropping them, so a form that offered them would turn a
-# turn into a traceback.
-REFUSED_ON_RESPONSES = ("stop", "logit_bias", "seed")
+# Why these three are absent from OpenRouterOptions rather than refused by it.
+# The Responses path rejects them outright, quoted from the plugin: "The
+# OpenRouter Responses API does not support these options: ...". It raises
+# rather than dropping them, and the transport is chosen per request, so a
+# control for any of them would be one the runtime cannot honour on the
+# default path - the rule is to not offer it, and this is the record of that
+# decision. Adding a field here means adding a refusal to `accept` too.
+UNAVAILABLE_ON_RESPONSES = ("stop", "logit_bias", "seed")
 
 # What the plugin calls each form field. Only the ones that differ are here.
 # `provider` is OpenRouter's routing object, and the form calls it `routing`
