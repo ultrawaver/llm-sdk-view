@@ -129,6 +129,39 @@ form enforces locally so a request cannot be built that the API would reject:
 - `max_tokens` may not exceed the model's output ceiling.
 - `response_inclusion` only exists on `web_search_20260318`.
 
+## Candidate PR: `llm` drops a truncated Responses turn
+
+`llm`'s Responses handler (`llm.default_plugins.openai_models._SharedResponses`)
+reads the final payload only from `response.completed`. A reply that hits
+`max_output_tokens` ends the stream with `response.incomplete` instead, and
+that branch does not exist, so the whole final payload is discarded:
+`response_json` stays `None`, `set_usage()` is never reached, and the turn has
+no counts, no stop reason and no content blocks. Only the streamed text
+survives.
+
+This is not OpenRouter-specific - the event is OpenAI's own, and the Responses
+API emits it whenever a reply is cut off at the ceiling - which is what makes
+it worth sending upstream rather than working around here.
+
+Measured 2026-09-30 against `openrouter/nvidia/nemotron-3-super-120b-a12b:free`
+through `client.responses.create(..., max_output_tokens=32)`. The stream ended:
+
+```
+response.output_text.done, response.incomplete
+```
+
+with `incomplete_details: {"reason": "max_output_tokens"}` and a full `usage`
+object on the discarded payload.
+
+The fix is to treat `response.incomplete` as a terminal payload alongside
+`response.completed`, keeping the reason available rather than inferred.
+
+What this project does until then: nothing that guesses. `stop_reason` is
+reported as unknown, and a usage object carrying no counts is not stored at
+all, so the context meter falls back to its labelled estimate. Storing it made
+the meter report 0 tokens as `API usage` - a measured figure that was never
+measured (`native_api_chat/chat.py`, `_record_usage`).
+
 ## Possible later contribution: LLM core
 
 Only after a demonstrated need, propose provider-neutral observation hooks for:

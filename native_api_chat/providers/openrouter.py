@@ -859,6 +859,24 @@ class OpenRouterProvider:
             )
         return error
 
+    def stop_reason(self, message: dict) -> str | None:
+        """Why the reply ended, from whichever of the two paths finished.
+
+        Chat Completions reports ``finish_reason``. Responses reports a
+        ``status``, and the reason only when that status is ``incomplete`` -
+        where it is the one worth showing, because it is the truncation the
+        user would otherwise mistake for a complete answer. Both are reported
+        as ``status: reason`` so the two halves cannot be read as one word.
+        """
+        finish = message.get("finish_reason")
+        if isinstance(finish, str) and finish:
+            return finish
+        status = message.get("status")
+        reason = (message.get("incomplete_details") or {}).get("reason")
+        if status and reason:
+            return f"{status}: {reason}"
+        return status or reason or None
+
     def blocks(self, message: dict) -> list[dict]:
         """Translate whichever of the two shapes finished into record blocks.
 

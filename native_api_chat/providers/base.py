@@ -107,6 +107,16 @@ class Provider(Protocol):
         it is, so only the provider may name it.
         """
 
+    def stop_reason(self, message: dict) -> str | None:
+        """Why the reply ended, in whatever word this provider uses.
+
+        The page shows this, and "unreported" is the wrong thing to show when
+        the reply was cut off at the token ceiling: a truncated answer that
+        does not say it was truncated reads as a complete one. Anthropic calls
+        it ``stop_reason``; the two OpenRouter paths call it ``finish_reason``
+        and ``incomplete_details.reason``.
+        """
+
     def blocks(self, message: dict) -> list[dict]:
         """The finished reply, as the content blocks a record is made of.
 

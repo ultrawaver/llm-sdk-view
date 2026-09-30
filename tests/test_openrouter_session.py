@@ -39,9 +39,9 @@ def client():
 def session(openrouter_registry, fake_openrouter):
     """A session on an OpenRouter model, with the reply scripted."""
 
-    def factory(text="Hi there.", *, usage=None, **fields):
+    def factory(text="Hi there.", *, usage=None, incomplete=False, **fields):
         (model_id,) = openrouter_registry("openai/gpt-5.4")
-        fake_openrouter.answers(text, usage=usage)
+        fake_openrouter.answers(text, usage=usage, incomplete=incomplete)
         return ChatSession(OpenRouterOptions(model=model_id, max_tokens=64, **fields))
 
     return factory
@@ -166,6 +166,59 @@ def test_a_cache_write_is_unknown_rather_than_inferred(session):
     chat.run_turn("hello")
 
     assert chat.baseline_usage["cache_creation"] is None
+
+
+def test_a_truncated_reply_reports_no_figure_rather_than_zero(session):
+    """The defect a real free-model turn exposed, and the worst kind.
+
+    A reply cut off at the ceiling ends the Responses stream with
+    ``response.incomplete``, which llm does not read, so every count arrives
+    None. The meter added four Nones to nothing and reported 0 tokens as
+    ``API usage`` - a measured figure, invented. Being measured is the whole
+    reason that label is trusted over the estimate beside it.
+    """
+    chat = session("Hi", incomplete=True)
+    chat.run_turn("hello")
+
+    assert chat.baseline_usage is None
+    assert chat.context().as_dict()["source"] == "estimated"
+
+
+def test_a_truncated_responses_turn_has_no_stop_reason_to_report(session):
+    """Not a choice this project gets to make: llm discards the event.
+
+    ``response.incomplete`` carries the reason, and llm's Responses handler
+    reads only ``response.completed``, so nothing about the truncation reaches
+    this process. The page says "unreported", which is the truth - the turn is
+    not recorded as having stopped normally.
+
+    This test states the gap rather than papering over it. Inferring "must
+    have hit the ceiling" from a missing Message would be a guess presented as
+    the provider's own word, and the fix belongs in llm.
+    """
+    chat = session("Hi", incomplete=True)
+    record = chat.run_turn("hello")["record"]
+
+    assert record["response"]["stop_reason"] is None
+    assert record["response"]["response_json"] is None
+    # The reply itself still survives, off the stream.
+    assert record["response"]["text"] == "Hi"
+
+
+def test_a_finished_reply_says_so_too(session):
+    """The other half: a status is reported when nothing went wrong either."""
+    record = session("Hi there.").run_turn("hello")["record"]
+
+    assert record["response"]["stop_reason"] == "completed"
+
+
+def test_the_other_transport_reports_its_own_word_for_it(session):
+    """Chat Completions calls it ``finish_reason`` and llm does read it, so
+    this path keeps the counts the Responses path loses."""
+    chat = session("Hi", incomplete=True, chat_completions=True)
+    turn = chat.run_turn("hello")
+
+    assert turn["record"]["response"]["stop_reason"] == "length"
 
 
 def test_the_context_figure_follows_the_reported_usage(session):

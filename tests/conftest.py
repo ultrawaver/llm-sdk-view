@@ -399,27 +399,45 @@ class _Dumps:
         return self._dumped
 
 
-def _responses_reply(text, usage):
+def _responses_reply(text, usage, incomplete):
     """What OpenRouter streams on the Responses path.
 
     ``llm`` reads the answer off ``response.output_text.delta`` and takes the
     token counts out of the ``response.completed`` payload, so a turn that has
     to finish needs both events.
+
+    A reply cut off at the token ceiling ends the stream with
+    ``response.incomplete`` instead - measured against the real API, and llm
+    reads no part of it, so the turn arrives with neither a Message nor any
+    counts. ``incomplete`` reproduces that, because it is the shape that
+    exposed a context meter reporting 0 tokens as a measured figure.
     """
-    completed = {"id": "resp_fake", "model": "openai/gpt-5.4", "output": [], "usage": usage}
-    response = _Dumps(completed)
+    final = {
+        "id": "resp_fake",
+        "model": "openai/gpt-5.4",
+        "status": "incomplete" if incomplete else "completed",
+        "output": [],
+        "usage": usage,
+    }
+    if incomplete:
+        final["incomplete_details"] = {"reason": "max_output_tokens"}
+    response = _Dumps(final)
     response.output = []
     deltas = [_Event(type="response.output_text.delta", delta=text)] if text else []
-    return deltas + [_Event(type="response.completed", response=response)]
+    kind = "response.incomplete" if incomplete else "response.completed"
+    return deltas + [_Event(type=kind, response=response)]
 
 
-def _chat_reply(text, usage):
+def _chat_reply(text, usage, incomplete):
     """What OpenRouter streams on the Chat Completions path.
 
     A different shape entirely: chunks with ``choices[0].delta.content``, and
     the usage on a chunk of its own. Handing the Responses events to this path
     fails on the first attribute, which is the useful outcome - the two
     transports are genuinely two wire formats and the fake says so.
+
+    Truncation here is just a ``finish_reason``, which llm does read, so this
+    path keeps its counts where the Responses path loses them.
     """
     def chunk(content=None, usage=None, finish_reason=None):
         delta = _Event(role="assistant", content=content, tool_calls=None)
@@ -434,7 +452,8 @@ def _chat_reply(text, usage):
         )
 
     deltas = [chunk(content=text)] if text else []
-    return deltas + [chunk(finish_reason="stop"), chunk(usage=usage)]
+    ended = chunk(finish_reason="length" if incomplete else "stop")
+    return deltas + [ended, chunk(usage=usage)]
 
 
 # Each transport renders the same scripted turn in its own wire shape, so a
@@ -462,8 +481,7 @@ class _FakeOpenAICalls:
 
     def create(self, **kwargs):
         self.sent.append((self.name, kwargs))
-        text, usage = self.sent.reply
-        return _FakeOpenAIStream(REPLY_SHAPES[self.name](text, usage))
+        return _FakeOpenAIStream(REPLY_SHAPES[self.name](*self.sent.reply))
 
 
 class _SentCalls(list):
@@ -471,11 +489,11 @@ class _SentCalls(list):
 
     def __init__(self):
         super().__init__()
-        self.reply: tuple = ("", {})
+        self.reply: tuple = ("", {}, False)
 
-    def answers(self, text="", *, usage=None):
+    def answers(self, text="", *, usage=None, incomplete=False):
         """Script one turn of plain text, in whichever shape gets asked for."""
-        self.reply = (text, usage or {})
+        self.reply = (text, usage or {}, incomplete)
 
 
 class _FakeOpenAIClient:

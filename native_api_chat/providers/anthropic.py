@@ -399,6 +399,10 @@ class AnthropicProvider:
         id it does not know really is one this tool version cannot send."""
         return error
 
+    def stop_reason(self, message: dict) -> str | None:
+        """Anthropic's own word for it, on the Message where it already sits."""
+        return message.get("stop_reason")
+
     def blocks(self, message: dict) -> list[dict]:
         """Anthropic's Message already is a list of typed blocks.
 

@@ -212,6 +212,15 @@ def context_state(
     )
 
 
+#: The counts :func:`context_state` adds up. A usage carrying none of them
+#: cannot produce a figure, however many other fields it has.
+COUNT_FIELDS = ("input", "cache_creation", "cache_read", "output")
+
+
+def _has_counts(usage: dict) -> bool:
+    return any(isinstance(usage.get(field), int) for field in COUNT_FIELDS)
+
+
 def final_message_text(response: Any, provider: Any = None) -> str:
     """Assemble the reply from the final accumulated Message.
 
@@ -723,6 +732,15 @@ class ChatSession:
         Which details hold the cache counters is the provider's business:
         ``llm`` reports uncached input and output, and each plugin keeps the
         rest under its own names.
+
+        A usage object that arrives with no counts in it is not kept, because
+        downstream "there is a usage" means "the provider measured this". It
+        happens for real: a reply truncated at the token ceiling ends the
+        Responses stream with ``response.incomplete``, which ``llm`` does not
+        read, so every count comes back None. Keeping that dict made the
+        context meter add four Nones to nothing and report 0 tokens as the
+        provider's own figure - the one kind of wrong answer this meter must
+        never give, since being measured is the whole reason it is trusted.
         """
         try:
             usage = response.usage()
@@ -731,7 +749,8 @@ class ChatSession:
         details = getattr(response, "token_details", None)
         if not isinstance(details, dict):
             details = {}
-        self._usage = self.provider.usage_from(usage, details)
+        reported = self.provider.usage_from(usage, details)
+        self._usage = reported if _has_counts(reported) else None
 
     def stream_turn(self, text: str) -> Iterator[dict]:
         """Yield events: the prepared request, then text, then the final text.
@@ -794,11 +813,7 @@ class ChatSession:
             request_kwargs=prepared.kwargs,
             rendered_code=prepared.code,
             response=build_response_view(
-                prepared.response,
-                ttft_ms=ttft_ms,
-                blocks=self.provider.blocks(
-                    getattr(prepared.response, "response_json", None) or {}
-                ),
+                prepared.response, ttft_ms=ttft_ms, provider=self.provider
             ),
             context=self.context().as_dict(),
         )

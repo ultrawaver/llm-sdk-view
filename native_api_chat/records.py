@@ -345,20 +345,23 @@ class ResponseView:
 
 
 def build_response_view(
-    response: Any, ttft_ms: int | None = None, blocks: list[dict] | None = None
+    response: Any, ttft_ms: int | None = None, provider: Any = None
 ) -> ResponseView:
     """Read the Answer off the Message the SDK finished with.
 
     ``response_json`` is the accumulated Message, so citations, thinking and
     server tool blocks are still whole; nothing here rebuilds them from text.
 
-    ``blocks`` is the sending provider's own reading of that Message. Without
-    it the Anthropic shape is assumed, which is right for Anthropic and finds
-    no text at all on either OpenRouter path.
+    ``provider`` is the one that sent it, and it is asked about every part of
+    that Message whose shape differs between providers. Without it the
+    Anthropic shape is assumed: right for Anthropic, and on either OpenRouter
+    path it finds no text and no stop reason at all.
     """
     message = getattr(response, "response_json", None) or {}
-    if blocks is None:
-        blocks = _as_blocks(message)
+    blocks = provider.blocks(message) if provider else _as_blocks(message)
+    stop_reason = (
+        provider.stop_reason(message) if provider else message.get("stop_reason")
+    )
     return ResponseView(
         response_id=getattr(response, "id", None),
         message_id=message.get("id"),
@@ -371,7 +374,7 @@ def build_response_view(
         thinking=_block_text(blocks, THINKING_BLOCKS),
         citations=_citations(blocks),
         server_tool_blocks=_server_tool_blocks(blocks),
-        stop_reason=message.get("stop_reason"),
+        stop_reason=stop_reason,
         usage=_usage(response, message),
         response_json=message or None,
         duration_ms=_duration_ms(response),
