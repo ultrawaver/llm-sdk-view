@@ -872,6 +872,82 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   padding: 5px;
 }
 
+/* A menu with a search field is a column, not a scroller: the field has to
+   stay put while the list moves under it. `.pill-menu` scrolls itself
+   otherwise, which carries the field off the top on the first wheel. */
+.pill-menu.searchable {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Model ids run long - `nvidia/nemotron-3-super-120b-a12b:free` - and a
+     row that wraps to three lines is not a row. */
+  min-width: 320px;
+  max-width: 420px;
+}
+
+.pill-menu .msearch {
+  position: relative;
+  flex: none;
+  padding: 3px 9px 6px;
+}
+
+.pill-menu .msearch .micon {
+  position: absolute;
+  left: 19px;
+  top: 50%;
+  transform: translateY(-50%) translateY(-1px);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.pill-menu input[type="search"] {
+  width: 100%;
+  /* Room for the glyph on the left, and for the browser's own clear button
+     on the right. */
+  padding: 6px 9px 6px 26px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg-sunken);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.pill-menu input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* The browser draws its own clear button as a dark glyph, which on a dark
+   background is a button you cannot see. */
+@media (prefers-color-scheme: dark) {
+  .pill-menu input[type="search"]::-webkit-search-cancel-button {
+    filter: invert(1);
+  }
+}
+
+/* min-height: 0, or a flex child refuses to shrink below its content and the
+   menu grows past the window instead of the list scrolling inside it. */
+.pill-menu .mlist {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.pill-menu .mcount {
+  flex: none;
+  /* A reading of the list, not a footnote about the control. */
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 .pill-menu .mhead {
   font-size: 10px;
   font-weight: 700;
@@ -914,6 +990,21 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   background: var(--ok-bg);
   border-radius: 3px;
   padding: 0 5px;
+  flex: none;
+}
+
+/* A pricing tier the id itself names, not a recommendation: the green reads
+   "costs nothing", and the hover says it is a shared, rate-limited endpoint.
+   `tag` is the pill's own status, which is a different thing. */
+.pill-menu .mi .tier {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-radius: 3px;
+  padding: 1px 5px;
   flex: none;
 }
 

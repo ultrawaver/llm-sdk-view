@@ -836,5 +836,41 @@ been sent at `xhigh` thirteen turns running. The user had changed nothing.
 - The suite's per-test database swap left the application's live sessions
   behind, because `SESSIONS` is module state. A second test sending the same
   model reused the first one's `ChatSession`, and with it a conversation whose
-  storage had been deleted - which read as a send that silently produced no
-  turn. Cleared with the database it belongs to.
+storage had been deleted - which read as a send that silently produced no
+turn. Cleared with the database it belongs to.
+
+### The model list is filtered, and a free model is marked as one
+
+- A model menu with more than forty entries opens with a filter field above
+  it. OpenRouter registers a few hundred models, and a few hundred rows is not
+  a list a person picks from. The field is focused on open, matches every word
+  of the query in any order against the row's own text, and Escape clears the
+  query before it closes the menu - what a search field does everywhere else.
+  Anthropic's four models get no field: a search box over four rows is
+  furniture.
+- The cap is stated rather than applied quietly. A list that lost twenty
+  entries without a word reads like missing data instead of like a limit the
+  next keystroke lifts.
+- A row prints its name once. llm's `openrouter/` prefix is on every OpenRouter
+  model, so it tells them apart from nothing, and printing it twice - once as
+  the label and once as the id underneath - cost eleven characters of a row
+  that is already long. Anthropic keeps its second line: "Sonnet 5" and
+  `claude-sonnet-5-20260115` are two different strings and the request carries
+  the second one.
+- **A model on OpenRouter's free tier is marked `free`.** Read off the id and
+  never off the price: OpenRouter writes `0` both for models that cost nothing
+  and for models it is simply not pricing, so a zero there is evidence of
+  nothing. The `:free` suffix is the tier's own name, which makes it a fact
+  rather than an inference. The badge is green for "costs nothing" and its
+  hover says what the tier costs in return - a shared endpoint, rate limited by
+  everyone using it - so a badge does not read as a recommendation.
+- The query is matched against the row's text and not the underlying id.
+  Searching the id meant "open" matched all 356 OpenRouter models, because the
+  routing prefix is in every one of them. What you can search for is what you
+  can see.
+- The three reopening tests in `tests/test_provider_switch_in_a_browser.py`
+  waited on `state.turns.length`, which is filled in the moment the fetch
+  lands - the settings are restored and the bubbles drawn two round trips
+  later, and a throw or a slow render in between is invisible to that
+  condition. They now wait for the transcript itself, and for it to be new
+  nodes, since the transcript already on screen counts the same.

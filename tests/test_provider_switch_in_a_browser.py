@@ -358,6 +358,255 @@ def test_the_cache_readout_does_not_claim_a_control_openrouter_has_not_got(
     assert page.locator("#cacheWarn").is_hidden()
 
 
+# --- picking one out of a few hundred ----------------------------------------
+
+
+@pytest.fixture
+def many(openrouter_registry, browser, live_app):
+    """The page with enough OpenRouter models that a list is not a picker.
+
+    Sixty, not three hundred: the cap is forty, so sixty is already more than
+    one screen and every question below has the same answer it would have at
+    the real count.
+
+    One vendor each, because the catalogue keeps one model per series - six
+    vendors with ten versions apiece narrows to six models, and the list would
+    never be long enough to get a search field at all.
+    """
+    openrouter_registry(
+        *[
+            {"id": f"v{n:02d}/alpha-1", "created": 1_700_000_000 + n, "pricing": {}}
+            for n in range(60)
+        ],
+        "openai/gpt-5.4",
+        {"id": "generous/thing-1:free", "created": 1_800_000_000, "pricing": {}},
+    )
+    context = browser.new_context(viewport={"width": 1500, "height": 820})
+    page = context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.errors = errors
+    page.goto(live_app)
+    page.wait_for_selector('#settingsPills [data-pill="model"]')
+    page.wait_for_function("() => (state.data.provider.options || []).length > 1")
+    try:
+        yield page
+    finally:
+        context.close()
+
+
+def rows(page) -> list:
+    """What each row of the open menu's list reads, top to bottom."""
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll('#pillLayer .mlist .mi'))
+             .map((row) => row.querySelector('.grow').textContent)"""
+    )
+
+
+def test_a_long_model_list_opens_with_a_search_field(many):
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+
+    field = page.locator('#pillLayer input[type="search"]')
+    assert field.count() == 1
+    assert painted_at_its_own_rect(page, '#pillLayer input[type="search"]')
+    # Focused on open, or the first keystroke goes nowhere.
+    assert page.evaluate(
+        "() => document.activeElement"
+        " === document.querySelector('#pillLayer input[type=\"search\"]')"
+    )
+    assert page.errors == []
+
+
+def test_typing_narrows_the_list_to_what_matches(many):
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    before = rows(page)
+    page.keyboard.type("gpt")
+    after = rows(page)
+
+    assert len(before) == 40, "the cap, stated in the count line"
+    assert after == ["openai/gpt-5.4"]
+    assert "1 model match" in page.text_content("#pillLayer .mcount")
+
+
+def test_the_words_of_a_query_may_arrive_in_any_order(many):
+    """How a person types a name they half remember."""
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    page.keyboard.type("5.4 openai")
+
+    assert rows(page) == ["openai/gpt-5.4"]
+
+
+def test_a_row_does_not_print_the_same_name_twice(many):
+    """llm's routing prefix is on every OpenRouter model, so it tells them
+    apart from nothing and cost eleven characters of a row that is already
+    long. Anthropic keeps its second line: "Sonnet 5" and
+    claude-sonnet-5-20260115 are different strings."""
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+
+    assert all("openrouter/" not in row for row in rows(page))
+    assert page.evaluate(
+        """() => Array.from(document.querySelectorAll('#pillLayer .mlist .mi'))
+             .every((row) => !row.querySelector('.sub'))"""
+    )
+    assert "openrouter/" not in page.text_content('[data-pill="model"]')
+
+    page.keyboard.press("Escape")
+    switch_to(page, "anthropic")
+    page.click('[data-pill="model"]')
+    assert page.evaluate(
+        """() => Array.from(document.querySelectorAll('#pillLayer .mi'))
+             .some((row) => (row.querySelector('.sub') || {}).textContent
+                 === 'claude-haiku-4-5-20251001')"""
+    )
+
+
+def test_a_free_model_is_marked_as_one(many):
+    """The tier OpenRouter's own id names. Never inferred from a zero price:
+    OpenRouter writes 0 both for what costs nothing and for what it is not
+    pricing, so a zero there is evidence of nothing."""
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    page.keyboard.type("free")
+
+    tagged = page.evaluate(
+        """() => Array.from(document.querySelectorAll('#pillLayer .mlist .mi'))
+             .map((row) => [row.querySelector('.grow').textContent,
+                            (row.querySelector('.tier') || {}).textContent || ''])"""
+    )
+    assert tagged == [["generous/thing-1:free", "free"]]
+    # Green, and legible: a badge the same colour as the row is not a badge.
+    paint = page.evaluate(
+        """() => { const s = getComputedStyle(
+                 document.querySelector('#pillLayer .mlist .mi .tier'));
+                   return [s.color, s.backgroundColor]; }"""
+    )
+    assert paint[0] != paint[1]
+    assert page.locator("#pillLayer .mlist .mi .tier").first.is_visible()
+    # And the hover says what the tier costs in return.
+    assert "rate limited" in (
+        page.get_attribute("#pillLayer .mlist .mi .tier", "title") or ""
+    )
+
+
+def test_a_paid_model_carries_no_free_badge(many):
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    page.keyboard.type("gpt")
+
+    assert page.locator("#pillLayer .mlist .mi .tier").count() == 0
+
+
+def test_a_query_that_matches_nothing_says_so(many):
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    page.keyboard.type("nothing-is-called-this")
+
+    assert rows(page) == []
+    assert "no model matches" in page.text_content("#pillLayer .mcount")
+
+
+def test_the_cap_is_stated_rather_than_applied_quietly(many):
+    """A list that lost twenty entries without a word reads like missing data
+    instead of like a limit the next keystroke lifts."""
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    count = page.text_content("#pillLayer .mcount")
+
+    assert "showing 40 of 62" in count
+    assert "keep typing" in count
+
+
+def test_a_filtered_row_can_actually_be_clicked(many):
+    """The whole point, and the part that reading the source cannot answer:
+    the row is rebuilt on every keystroke, so it has to be a live target
+    afterwards and not a node left over from the previous query."""
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    page.keyboard.type("gpt")
+    assert painted_at_its_own_rect(page, "#pillLayer .mlist .mi")
+    page.locator("#pillLayer .mlist .mi").first.click()
+    page.wait_for_function(
+        "() => state.data.model.id === 'openrouter/openai/gpt-5.4'"
+    )
+
+    assert page.input_value("#model") == "openrouter/openai/gpt-5.4"
+    assert page.locator("#pillLayer .pill-menu").count() == 0
+
+
+def test_the_field_stays_on_screen_while_the_list_scrolls(many):
+    """The field is fixed and the list scrolls, not the other way round: a
+    search field that scrolls away on the first wheel is a search field you
+    have to go back up for."""
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    before = page.locator('#pillLayer input[type="search"]').bounding_box()
+    moved = page.evaluate(
+        """() => {
+            const list = document.querySelector('#pillLayer .mlist');
+            list.scrollTop = 400;
+            return list.scrollTop;
+        }"""
+    )
+    after = page.locator('#pillLayer input[type="search"]').bounding_box()
+
+    assert moved > 0, "the list is the scroller"
+    assert after["y"] == before["y"]
+    assert painted_at_its_own_rect(page, '#pillLayer input[type="search"]')
+
+
+def test_the_menu_fits_the_window_however_long_the_list_is(many):
+    page = many
+    page.set_viewport_size({"width": 900, "height": 700})
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    box = page.locator("#pillLayer .pill-menu").bounding_box()
+
+    assert box["y"] >= 0
+    assert box["y"] + box["height"] <= 700
+    assert box["x"] >= 0
+    assert box["x"] + box["width"] <= 900
+
+
+def test_escape_clears_the_query_before_it_closes_the_menu(many):
+    """What a search field does everywhere else. Closing on the first Escape
+    would throw away the menu instead of the word that was mistyped."""
+    page = many
+    switch_to(page, "openrouter")
+    page.click('[data-pill="model"]')
+    page.keyboard.type("gpt")
+    page.keyboard.press("Escape")
+
+    assert page.locator("#pillLayer .pill-menu").count() == 1
+    assert page.input_value('#pillLayer input[type="search"]') == ""
+    assert len(rows(page)) == 40
+
+    page.keyboard.press("Escape")
+    assert page.locator("#pillLayer .pill-menu").count() == 0
+
+
+def test_a_short_list_gets_no_search_field(many):
+    """Anthropic offers four models. A field over four rows is furniture."""
+    page = many
+    page.click('[data-pill="model"]')
+
+    assert page.locator('#pillLayer input[type="search"]').count() == 0
+    assert page.locator("#pillLayer .mi").count() == 4
+
+
 def test_the_context_header_names_its_source_rather_than_saying_undefined(
     switchable,
 ):
@@ -388,6 +637,38 @@ def test_send_is_available_on_an_openrouter_model(switchable):
 # --- reopening one, which is where the assumption bit hardest ----------------
 
 
+def reopen(page, turns: int = 1):
+    """Open the stored conversation and wait until it is actually on screen.
+
+    ``state.turns`` is filled in the moment the fetch lands, and the settings
+    are restored and the bubbles drawn only after it - there are two more
+    round trips between the two. Waiting on ``state.turns.length`` therefore
+    measures the fetch and not the conversation, and every assertion below it
+    ran against a page that had not drawn anything yet: the transcript
+    arrived some hundreds of milliseconds after the test had already read it
+    as empty.
+
+    Wait for the bubbles instead, and for them to be *new* bubbles: the
+    transcript that was on screen before the click counts the same, so a
+    count alone is satisfied by the conversation that was already there.
+    That is the thing the bug report was about, and it is the only signal
+    here a person can see.
+    """
+    page.evaluate(
+        "() => { window.__shown = Array.from("
+        "document.querySelectorAll('#messages .msg')); }"
+    )
+    page.click(".conversation")
+    page.wait_for_function(
+        """(want) => {
+            const now = Array.from(document.querySelectorAll('#messages .msg'));
+            return now.length === want
+              && !now.some((bubble) => window.__shown.includes(bubble));
+        }""",
+        arg=turns * 2,
+    )
+
+
 def test_reopening_an_openrouter_conversation_shows_it(sending):
     """The reported defect: a stored OpenRouter conversation opened empty.
 
@@ -405,9 +686,7 @@ def test_reopening_an_openrouter_conversation_shows_it(sending):
     page.wait_for_function("() => state.turns.length === 1")
     page.click("#newConversation")
     page.wait_for_function("() => state.turns.length === 0")
-
-    page.click(".conversation")
-    page.wait_for_function("() => state.turns.length === 1")
+    reopen(page)
 
     assert page.errors == []
     assert page.locator("#messages .msg").count() == 2
@@ -434,9 +713,7 @@ def test_a_reopened_conversation_gets_its_own_providers_settings_back(sending):
     page.wait_for_function("() => state.turns.length === 1")
     page.click("#newConversation")
     page.wait_for_function("() => state.turns.length === 0")
-
-    page.click(".conversation")
-    page.wait_for_function("() => state.turns.length === 1")
+    reopen(page)
 
     assert page.input_value("#reasoningEffort") == "high"
     assert page.input_value("#chatCompletions") == "true"
@@ -460,10 +737,8 @@ def test_reopening_hands_the_form_back_to_the_conversations_own_provider(sending
     page.click("#send")
     page.wait_for_function("() => state.turns.length === 1")
     switch_to(page, "anthropic")
-
-    page.click(".conversation")
-    page.wait_for_function("() => state.data.provider.id === 'openrouter'")
-    page.wait_for_timeout(50)
+    reopen(page)
+    assert page.evaluate("() => state.data.provider.id") == "openrouter"
 
     assert page.errors == []
     assert page.locator("#messages .msg").count() == 2

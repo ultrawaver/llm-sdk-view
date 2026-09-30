@@ -706,10 +706,14 @@ window.addEventListener('scroll', hideWhyTip, true);
    "claude-<family>-<major>-<minor>-<date>" reads as "Family Major.Minor". It
    invents no fact - an id it cannot parse is shown as it is. */
 function shortModelName(id) {
-  const match = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(id || '');
-  if (!match) return id || '?';
-  const name = match[1][0].toUpperCase() + match[1].slice(1);
-  return name + ' ' + match[2] + (match[3] ? '.' + match[3] : '');
+  // llm's routing prefix is not part of the name: it is on every OpenRouter
+  // model, so it distinguishes none of them and costs eleven characters in a
+  // row that is already long.
+  const name = (id || '').startsWith('openrouter/') ? id.slice(11) : id;
+  const match = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(name || '');
+  if (!match) return name || '?';
+  const family = match[1][0].toUpperCase() + match[1].slice(1);
+  return family + ' ' + match[2] + (match[3] ? '.' + match[3] : '');
 }
 
 const cap1 = (text) => text ? text[0].toUpperCase() + text.slice(1) : text;
@@ -769,12 +773,19 @@ function openPillMenu(pill, build) {
 }
 
 function menuItem(menu, { label, sub = '', selected = false, disabled = false,
-                          def = false, onPick = null }) {
+                          def = false, tier = '', tierTitle = '', onPick = null }) {
   const item = document.createElement('button');
   item.className = 'mi' + (selected ? ' selected' : '') + (disabled ? ' disabled' : '');
   item.innerHTML = '<span class="check">' + (selected ? '✓' : '') + '</span>'
     + '<span class="grow">' + esc(label) + (sub ? '<span class="sub">' + esc(sub) + '</span>' : '')
-    + '</span>' + (def ? '<span class="def">default</span>' : '');
+    + '</span>'
+    // A pricing tier the row carries, not a status badge: `tag` is the name
+    // the pill's own status used to be rendered under, and the two are not
+    // the same thing - this one says what a model costs, and it says so in
+    // the list rather than on the pill.
+    + (tier ? '<span class="tier"' + (tierTitle ? ' title="' + esc(tierTitle) + '"' : '')
+        + '>' + esc(tier) + '</span>' : '')
+    + (def ? '<span class="def">default</span>' : '');
   if (onPick && !disabled) {
     item.addEventListener('click', () => { onPick(); });
   }
@@ -794,6 +805,114 @@ function menuHead(menu, text) {
   head.className = 'mhead';
   head.textContent = text;
   menu.appendChild(head);
+}
+
+/* A search field over a menu's own list, and the scrolling list under it.
+
+   OpenRouter registers a few hundred models, and a few hundred rows is not a
+   list a person picks from. The field and the list are built once and only
+   the list's contents are rewritten, for the reason the pills are kept across
+   renders: a node detached between mousedown and mouseup gets no click, and
+   here that node would be the row the user was aiming at.
+
+   The menu becomes a column with a fixed head and a scrolling body, so the
+   field stays on screen while the list moves under it. `.pill-menu` scrolls
+   itself otherwise, which would carry the field away on the first wheel. */
+function menuSearch(menu, { placeholder, render }) {
+  menu.classList.add('searchable');
+  const field = document.createElement('div');
+  field.className = 'msearch';
+  field.innerHTML = '<span class="micon" aria-hidden="true">⌕</span>'
+    + '<input type="search" autocomplete="off" spellcheck="false"'
+    + ' placeholder="' + esc(placeholder) + '">';
+  menu.appendChild(field);
+  const list = document.createElement('div');
+  list.className = 'mlist';
+  menu.appendChild(list);
+  const count = document.createElement('div');
+  count.className = 'mnote mcount';
+  menu.appendChild(count);
+
+  const input = field.querySelector('input');
+  const run = () => {
+    // The list is emptied and refilled rather than replaced: the container
+    // is what the wheel and the scrollbar are attached to.
+    list.innerHTML = '';
+    count.textContent = render(list, input.value.trim().toLowerCase());
+    // A narrowed list starts at its own top, never at the offset the
+    // previous query happened to be scrolled to.
+    list.scrollTop = 0;
+  };
+  // `input`, not `change`: the list has to follow the typing, and `change`
+  // on a search field only fires on blur or Enter.
+  input.addEventListener('input', run);
+  // Escape inside the field clears it first and closes the menu only when
+  // there is nothing left to clear, which is what a search field does
+  // everywhere else.
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && input.value) {
+      event.stopPropagation();
+      input.value = '';
+      run();
+    }
+  });
+  run();
+  // preventScroll: the menu is fixed and has already been placed.
+  input.focus({ preventScroll: true });
+  return input;
+}
+
+/* Rows are capped so that opening the menu does not build several hundred
+   nodes, and the cap is stated rather than applied quietly: a list that lost
+   three hundred entries without a word reads like missing data instead of
+   like a limit the next keystroke lifts. */
+const SEARCH_ROWS = 40;
+
+/* Every word in the query has to appear somewhere in the row's own text. Two
+   words in either order then find one model - "gpt 5" and "5 gpt" both reach
+   openai/gpt-5.4 - which is how a person types a name they half remember.
+
+   The row's text and not the underlying id: llm's `openrouter/` prefix is on
+   every model, so searching the id means "open" matches all 356 of them. What
+   you can search for is what you can see. */
+function matchesQuery(text, query) {
+  if (!query) return true;
+  const haystack = text.toLowerCase();
+  return query.split(/\s+/).every((word) => haystack.includes(word));
+}
+
+/* OpenRouter's own free tier, as the id names it.
+
+   Read off the id and never off the price: OpenRouter writes "0" both for
+   models that really cost nothing and for models it is simply not pricing, so
+   a zero there is not evidence of anything. The `:free` suffix is the tier's
+   own name, which makes it a fact rather than an inference.
+
+   It is a shared endpoint with a shared rate limit, which is why the tag says
+   so on hover rather than reading as a recommendation. */
+const FREE_TIER = ':free';
+
+/* One model's row, in either list. */
+function modelRow(id) {
+  const label = shortModelName(id);
+  const free = label.endsWith(FREE_TIER);
+  return {
+    label,
+    tier: free ? 'free' : '',
+    tierTitle: free
+      ? "OpenRouter's free tier · a shared endpoint, rate limited by everyone "
+        + 'using it'
+      : '',
+    // The id only earns a second line when it is not the label again.
+    // "Sonnet 5" is worth pairing with the dated id underneath it, because
+    // the two are different strings and the request carries the second one.
+    // `openrouter/openai/gpt-5.4` under `openai/gpt-5.4` is the same name
+    // twice, with llm's routing prefix - which is on every row, so it tells
+    // the rows apart from nothing - as the only difference.
+    sub: id.endsWith(label) ? '' : id,
+    selected: id === byId('model').value,
+    onPick: () => { closePillMenu(); setControl('model', id); }
+  };
 }
 
 /* What the thinking control's on/off is called for this model: the API's own
@@ -881,21 +1000,38 @@ const PILL_DEFS = [
         : shortModelName(select.value);
     },
     menu: (menu) => {
+      const all = state.data.models || [];
       menuHead(menu, 'Model');
-      (state.data.models || []).forEach((id) => {
-        menuItem(menu, {
-          label: shortModelName(id), sub: id,
-          selected: id === byId('model').value,
-          onPick: () => { closePillMenu(); setControl('model', id); }
-        });
-      });
       // The list narrowed on purpose, and a short list that lost nine models
-      // without a word reads like missing data rather than like a rule.
+      // without a word reads like missing data rather than like a rule. It
+      // goes above the field: it is a fact about the whole list, not about
+      // whatever the current query left in it.
       const superseded = (state.data.superseded || []).length;
       if (superseded) {
         menuNote(menu, esc(superseded + ' earlier models not listed · one '
           + 'model per series, newest first'));
       }
+      // Under forty models is a list; three hundred is not. The field only
+      // appears where it is the difference between picking and scrolling.
+      if (all.length <= SEARCH_ROWS) {
+        all.forEach((id) => menuItem(menu, modelRow(id)));
+        return;
+      }
+      menuSearch(menu, {
+        placeholder: 'Filter ' + all.length + ' models…',
+        render: (list, query) => {
+          const found = all.map(modelRow)
+            .filter((row) => matchesQuery(row.label + ' ' + row.sub, query));
+          found.slice(0, SEARCH_ROWS).forEach((row) => menuItem(list, row));
+          if (!found.length) return 'no model matches “' + query + '”';
+          if (found.length > SEARCH_ROWS) {
+            return 'showing ' + SEARCH_ROWS + ' of ' + found.length
+              + ' · keep typing to narrow it';
+          }
+          return found.length + (found.length === 1 ? ' model' : ' models')
+            + (query ? ' match' : '');
+        }
+      });
     }
   },
   {
