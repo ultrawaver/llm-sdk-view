@@ -10,6 +10,7 @@ No fixture here reads a key, and none can reach the network.
 """
 
 import copy
+import json
 import os
 import shutil
 import socket
@@ -26,7 +27,7 @@ import uvicorn
 
 import native_api_chat
 from native_api_chat import capabilities as capabilities_module
-from native_api_chat import model_api, rates_page
+from native_api_chat import model_api, openrouter_api, rates_page
 from native_api_chat.app import create_app
 from native_api_chat.chat import ChatOptions, ChatSession
 
@@ -147,6 +148,13 @@ def isolated_machine(monkeypatch):
     directory = tempfile.mkdtemp(prefix="native-api-chat-cache-")
     monkeypatch.setenv("NATIVE_API_CHAT_CACHE_DIR", directory)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_KEY", raising=False)
+    # llm's own directory moves too. ``llm-openrouter`` registers a model per
+    # entry in ``$LLM_USER_PATH/openrouter_models.json`` and downloads that
+    # file when it is missing, so a developer with a key in the environment
+    # would otherwise run this suite against 464 live models and a real
+    # fetch. Here the directory starts empty, which is the same machine CI is.
+    monkeypatch.setenv("LLM_USER_PATH", directory)
 
     # The Models API layer and the send path both read the key store, which on
     # this machine may hold a real key. A test that silently found one would
@@ -407,6 +415,120 @@ def openrouter_model():
     """An OpenRouter model built the way the plugin builds one."""
     llm_openrouter = pytest.importorskip("llm_openrouter")
     return llm_openrouter.OpenRouterResponses(**OPENROUTER_MODEL_KWARGS)
+
+
+@pytest.fixture(autouse=True)
+def no_openrouter_catalogue(monkeypatch):
+    """The catalogue is public and free, and the suite still never reads it.
+
+    A background refresh firing mid-test would make the result depend on the
+    network and on what OpenRouter published this morning. The fetch is
+    replaced with a refusal rather than removed, so the "catalogue
+    unavailable" path is the one an ordinary test exercises - which is the
+    machine a first run is on anyway.
+    """
+    real = {
+        "fetch_models": openrouter_api.fetch_models,
+        "kick_refresh": openrouter_api.kick_refresh,
+    }
+
+    def refuse(timeout=openrouter_api.FETCH_TIMEOUT_SECONDS):
+        raise openrouter_api.CatalogUnavailable("tests never read the catalogue")
+
+    monkeypatch.setattr(openrouter_api, "fetch_models", refuse)
+    monkeypatch.setattr(openrouter_api, "kick_refresh", lambda *args, **kwargs: False)
+    return real
+
+
+# One entry from /api/v1/models, trimmed to the fields anything reads. The
+# shape is the API's own, because that shape is what the capability reader has
+# to survive - a tidied-up stand-in would pass here and fail on the wire.
+CATALOGUE_ENTRY = {
+    "id": "anthropic/claude-sonnet-5",
+    "canonical_slug": "anthropic/claude-sonnet-5-20260630",
+    "name": "Anthropic: Claude Sonnet 5",
+    "created": 1782843083,
+    "context_length": 1_000_000,
+    "architecture": {
+        "modality": "text+image+file->text",
+        "input_modalities": ["text", "image", "file"],
+        "output_modalities": ["text"],
+        "tokenizer": "Claude",
+    },
+    "pricing": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "web_search": "0.01",
+        "input_cache_read": "0.0000002",
+        "input_cache_write": "0.0000025",
+    },
+    "top_provider": {
+        "context_length": 1_000_000,
+        "max_completion_tokens": 128_000,
+        "is_moderated": True,
+    },
+    "supported_parameters": [
+        "include_reasoning",
+        "max_completion_tokens",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "stop",
+        "structured_outputs",
+        "tool_choice",
+        "tools",
+        "verbosity",
+    ],
+}
+
+
+def catalogue_entry(model_id: str, **overrides) -> dict:
+    """A catalogue entry for ``model_id``, differing only where asked."""
+    entry = copy.deepcopy(CATALOGUE_ENTRY)
+    entry["id"] = model_id
+    entry["name"] = model_id
+    entry.update(copy.deepcopy(overrides))
+    return entry
+
+
+@pytest.fixture
+def openrouter_catalogue():
+    """Install catalogue entries as this project's own disk cache."""
+
+    def install(*models):
+        entries = [
+            catalogue_entry(model, **{}) if isinstance(model, str) else model
+            for model in models
+        ]
+        openrouter_api.save_cache(entries)
+        return entries
+
+    return install
+
+
+@pytest.fixture
+def openrouter_registry(monkeypatch, openrouter_catalogue):
+    """Register OpenRouter models the way ``llm-openrouter`` really does.
+
+    The plugin's own ``register_models()`` runs: it reads its model list from
+    ``$LLM_USER_PATH/openrouter_models.json`` and needs a key to register
+    anything at all. Seeding that file and a key is therefore enough to get
+    genuine registered models, with genuine Options, without a network or a
+    real key - and it is what a keyless machine differs from.
+    """
+
+    def install(*models, key="fake-key-for-tests"):
+        entries = openrouter_catalogue(*models)
+        # The plugin's own cache, fresh enough that it will not re-download.
+        (Path(llm.user_dir()) / "openrouter_models.json").write_text(
+            json.dumps({"data": entries}), "utf-8"
+        )
+        if key:
+            monkeypatch.setenv("OPENROUTER_KEY", key)
+        return tuple(f"openrouter/{entry['id']}" for entry in entries)
+
+    return install
 
 
 @pytest.fixture
