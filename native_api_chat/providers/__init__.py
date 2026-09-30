@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from .anthropic import AnthropicProvider
 from .base import Provider, Transport
+from .openrouter import OpenRouterProvider
 
-PROVIDERS: tuple[Provider, ...] = (AnthropicProvider(),)
+PROVIDERS: tuple[Provider, ...] = (AnthropicProvider(), OpenRouterProvider())
 
 
 def provider_for(model_id: str) -> Provider:

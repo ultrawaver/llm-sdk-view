@@ -1,9 +1,12 @@
 """Shared offline fixtures for the conversation tests.
 
-Only the Anthropic transport is faked. Everything above it - the real
-``llm.Conversation``, the real ``llm-anthropic`` ``execute()`` loop and the
-real ``model.build_kwargs()`` - runs untouched, so a prepared turn is the
-request the provider would have received.
+Only the provider transports are faked. Everything above them - the real
+``llm.Conversation``, the real plugin ``execute()`` loops and the real request
+builders - runs untouched, so a prepared turn is the request the provider
+would have received. That is what makes "the pane shows the call that really
+happens" something the suite can check rather than something it assumes.
+
+No fixture here reads a key, and none can reach the network.
 """
 
 import copy
@@ -151,14 +154,19 @@ def isolated_machine(monkeypatch):
     # the only source either of them sees.
     monkeypatch.setattr(model_api, "api_key", lambda: os.environ.get("ANTHROPIC_API_KEY"))
     def get_key(explicit_key=None, key_alias=None, env_var=None, **kwargs):
-        """Environment only: never the developer's own key store.
+        """The environment and the caller: never the developer's key store.
 
         ``llm-anthropic`` asks for its key by alias with no environment
         fallback, so a test that found the key stored on this machine would
         pass here and fail on CI. Whatever the key fixture installs is what
         every send path sees.
+
+        An explicit key still wins, because upstream's own ``get_key`` prefers
+        it and a stand-in that quietly dropped it would make this suite
+        disagree with the runtime it exists to check. It comes from the test,
+        not from the machine, so it cannot be the developer's.
         """
-        return os.environ.get(env_var or "ANTHROPIC_API_KEY")
+        return explicit_key or os.environ.get(env_var or "ANTHROPIC_API_KEY")
 
     monkeypatch.setattr(llm, "get_key", get_key)
     capabilities_module.reset_model_data()
@@ -341,6 +349,82 @@ def fake_provider(monkeypatch, transports):
         return _FakeClient(sent, transports, **kwargs)
 
     monkeypatch.setattr(llm_anthropic, "Anthropic", factory)
+    return sent
+
+
+# --- OpenRouter -------------------------------------------------------------
+#
+# llm-openrouter registers no models without a key, so a test builds the model
+# by hand. The kwargs below are the ones `register_models()` really passes,
+# including the two headers that go on the wire - a fake that dropped them
+# would let the rendered client drift from the real one unnoticed.
+OPENROUTER_MODEL_KWARGS = dict(
+    model_id="openrouter/anthropic/claude-sonnet-5",
+    model_name="anthropic/claude-sonnet-5",
+    vision=True,
+    reasoning=True,
+    verbosity=False,
+    supports_schema=True,
+    supports_tools=True,
+    api_base="https://openrouter.ai/api/v1",
+    headers={
+        "HTTP-Referer": "https://llm.datasette.io/",
+        "X-OpenRouter-Title": "LLM",
+    },
+)
+
+
+class _FakeOpenAIStream:
+    """An empty stream: these tests are about the request, not the reply."""
+
+    def __iter__(self):
+        return iter(())
+
+
+class _FakeOpenAICalls:
+    def __init__(self, name, sent):
+        self.name = name
+        self.sent = sent
+
+    def create(self, **kwargs):
+        self.sent.append((self.name, kwargs))
+        return _FakeOpenAIStream()
+
+
+class _FakeOpenAIClient:
+    """Records which of the two OpenRouter calls was made, and with what."""
+
+    def __init__(self, sent, **init):
+        self.init = init
+        self.responses = _FakeOpenAICalls("responses.create", sent)
+        self.chat = type(
+            "_Chat", (), {"completions": _FakeOpenAICalls("chat.completions.create", sent)}
+        )()
+
+
+@pytest.fixture
+def openrouter_model():
+    """An OpenRouter model built the way the plugin builds one."""
+    llm_openrouter = pytest.importorskip("llm_openrouter")
+    return llm_openrouter.OpenRouterResponses(**OPENROUTER_MODEL_KWARGS)
+
+
+@pytest.fixture
+def fake_openrouter(monkeypatch):
+    """Replace the OpenAI client, keep llm-openrouter's own execute() real.
+
+    Returns the list of ``(method, kwargs)`` the plugin actually called, which
+    is what lets a test compare the rendered request against the sent one
+    without either side being derived from the other.
+    """
+    from llm.default_plugins import openai_models
+
+    sent: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        openai_models.openai,
+        "OpenAI",
+        lambda **init: _FakeOpenAIClient(sent, **init),
+    )
     return sent
 
 
