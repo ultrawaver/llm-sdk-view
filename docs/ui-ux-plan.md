@@ -7,8 +7,10 @@ Landed: assets split into `index.html` + `app.css` + `app.js` with a vendored
 Prism, light and dark themes both honoured, one status-badge language for the
 six statuses, the context meter bar with its refusal messages, syntax
 highlighting with a copy button, turn numbers on bubbles, the keyboard map,
-and the floating cost/cache footer (per-turn receipt with unit rates,
-prompt-cache hit rate, session total, TTL countdown). Each bubble is also a
+and the floating cost/cache footer (a receipt with unit rates, prompt-cache
+hit rate and TTL countdown). The footer totals the **conversation**; a
+**turn's** own receipt is the card hovering its answer puts up, and hovering
+the request bubble shows the settings that went out. Each bubble is also a
 link into the pane it carries — the user's bubble to the Request, the
 assistant's to the Response — with the turn's own time above it in the
 computer's zone (job 4, "turn↔inspector association").
@@ -18,7 +20,7 @@ the collapsible panel to **eight pills in the topbar**, each opening an
 anchored menu over the same hidden value store; the effort menu lists only
 real levels with the documented default tagged; the thinking budget appears
 nowhere as a control (its floor is enforced in the Max tokens menu); history
-shows each turn's settings in one shared hover card, marks settings changes
+shows each turn's settings on the request bubble's hover card, marks settings changes
 between turns with a dashed divider, and warns above the composer when a
 change invalidates the cache prefix (only model/system/tools fields warn).
 

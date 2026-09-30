@@ -653,3 +653,66 @@ been sent at `xhigh` thirteen turns running. The user had changed nothing.
   that pins the wiring, with the behaviour measured in the browser.
 
 
+
+### The footer totals the conversation, and a turn's receipt is on its answer
+
+- The cost footer described whichever turn was selected, so the conversation's
+  own total existed only as a row inside the popover and moved every time a
+  bubble was clicked. It is now the conversation's: `conversationTotals()`
+  sums every turn the session holds, and the bar reads `2 turns` in front of
+  the total, the cache-hit rate and the countdown.
+  `selectedCost()` and `sessionCost()` are gone; selecting a turn changes the
+  right pane and nothing else.
+- The sum is built from the turns' own receipt *lines*, not re-derived from
+  their totals, so the answer's receipt and the footer's cannot disagree about
+  what a cache read cost. Both scopes are drawn by one `costReceiptHtml()`, and
+  a total is always the sum of the rows printed above it.
+- The turns it cannot price are counted out loud. A model the pricing page does
+  not cover has no estimate, and the old session row silently dropped those
+  turns from both the money and the count. The popover now says `1 of 2 turns
+  have no estimate and are not included above`, and names how many turns
+  reported no cache counters at all.
+- Hovering an answer now shows that turn's own receipt - the composition bar,
+  the Input/Output/Tools rows with unit rates, the total, the hit-rate formula
+  and the saving against no cache - instead of a second copy of the request's
+  settings. The settings card stays on the question bubble, where the settings
+  came from, and the receipt wears the wider card its four columns need.
+- Only the answer bubble gets a cost card; both cards are the same fixed,
+  `pointer-events: none` overlay, so neither can swallow the click that picks
+  the turn it describes, and the build function runs at hover time so a card
+  always describes the record it is over.
+- The bar carries only what it can show whole, and what that is was measured
+  rather than guessed. The conversation's token totals left it - they were the
+  widest thing there, and a half-drawn `5.2k in · 81…` claims a precision the
+  bar does not have - and so did the tool-call count, which would have put the
+  same squeeze back the first time a conversation searched. Both are in the
+  popover: the tokens as the receipt's own rows, the searches on its header
+  line beside the model.
+- Making one cell elastic was tried first and only moved the defect along:
+  with the hit rate as the shrinkable cell, at 1100px it was drawn 82px wide
+  for 104px of text, at 1024px 44px, and at 960px all twelve of them. So the
+  rule is now "whole or absent": the bar's wrapper is a query container
+  (`container-type: inline-size`, so it follows the pane and not the window),
+  and below the width at which every cell fits at its natural width the cache
+  hit rate is dropped rather than drawn in half. The one figure the bar can do
+  without is the one that goes - it is derived from the receipt's own lines,
+  and the popover prints that arithmetic in full.
+- Tests: `tests/test_cost_scopes.py` and `tests/test_cost_scopes_in_a_browser.py`
+  (nine browser checks - the footer equals the sum of the turns, clicking a
+  bubble does not move it, the popover totals the conversation and still floats
+  above the bar, the answer's hover card is its receipt while the question's is
+  its settings, an unpriced turn is named rather than dropped, an unreachable
+  pricing page says so, a conversation's searches are counted in the details,
+  and the bar keeps only
+  what fits: no cell truncated, no overflow and the button still inside it at
+  1280, 1100, 1024 and 960px, with the hit rate present at the first and gone
+  at the last). They fail against the previous implementation - removing the
+  drop rule alone fails the bar check at 1100px, where the hit rate stays rigid
+  and the scope label is what gets truncated instead. The test that pinned
+  "typing repaints the cost footer" now pins the opposite, because the footer
+  no longer describes the selection.
+- Fixed on the way past: "there are no rates" could never be shown. The page
+  read `state.rates.state` and `state.rates.error`, while `/api/rates` sends
+  `rates_state` and `rates_error` - so the reason for a missing estimate always
+  fell through to the vaguer "no cost estimate" instead of naming the
+  unreachable pricing page.

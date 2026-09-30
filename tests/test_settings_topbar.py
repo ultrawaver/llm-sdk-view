@@ -114,10 +114,16 @@ def test_budget_tokens_are_not_a_pill(static_page):
 # --- history: hover card, divider, cache hint --------------------------------
 
 
-def test_bubbles_offer_the_turns_settings_card(static_page):
+def test_the_request_bubble_offers_the_turns_settings_card(static_page):
+    """On the user's bubble only. The settings are what the request asked for,
+    and the answer used to show the same card - two copies of one fact, and
+    nowhere for the answer's own figures. What the answer carries instead is
+    its turn's receipt (see test_cost_scopes.py)."""
     assert "function wireSettingsCard(div, turnIndex)" in static_page
     assert "wireSettingsCard(user.parentElement, index);" in static_page
-    assert "wireSettingsCard(assistant.parentElement, index);" in static_page
+    assert "wireSettingsCard(userBody.parentElement, state.selected);" in static_page
+    assert "wireSettingsCard(assistant" not in static_page
+    assert "wireSettingsCard(body.parentElement" not in static_page
 
 
 def test_a_turn_without_a_sidecar_row_says_not_recorded(static_page):

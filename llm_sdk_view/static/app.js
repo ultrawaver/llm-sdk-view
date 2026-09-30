@@ -247,10 +247,16 @@ jumpPill.addEventListener('click', () => {
   scrollChatToBottom(true);
 });
 
-/* --- cost footer -------------------------------------------------------------
-   The numbers are ResponseView.cost, computed server-side from a versioned
-   rate table and labelled as estimates. This file only formats them; it
-   never prices anything itself. */
+/* --- cost ---------------------------------------------------------------------
+   One receipt shape, two scopes. The footer is the CONVERSATION's own total -
+   every turn it holds, summed - and a turn's own receipt is shown by hovering
+   its answer, where it describes that one turn. The settings card stays on the
+   user's bubble, because the settings are what the request asked for; showing
+   them on both bubbles made the answer look like a second copy of the request.
+
+   The numbers are ResponseView.cost, computed server-side from rates the
+   pricing page publishes and labelled as estimates. This file only sums and
+   formats them; it never prices anything itself. */
 
 function money(usd) {
   if (typeof usd !== 'number') return '–';
@@ -259,24 +265,75 @@ function money(usd) {
   return (usd < 0 ? '-$' : '$') + abs.toFixed(digits);
 }
 
+const round6 = (value) => Math.round(value * 1e6) / 1e6;
+
 function costLine(cost, key) {
   return (cost.lines || []).find((line) => line.key === key) || null;
 }
 
-function selectedCost() {
-  const index = state.selected === null ? state.turns.length - 1 : state.selected;
-  const record = state.turns[index];
-  return record && record.response ? record.response.cost || null : null;
-}
-
-function sessionCost() {
-  let total = 0;
-  let turns = 0;
+/* The conversation's totals, summed from the turns' own receipts.
+   Summing the lines rather than re-deriving keeps one definition of a line, so
+   the answer's receipt and the footer's cannot disagree about what a cache
+   read cost. Only priced turns are in the money: a turn whose model the
+   pricing page does not cover has no estimate at all, and the count of those
+   travels with the total so the popover can say the sum is short of the
+   conversation instead of quietly reporting a smaller one. */
+function conversationTotals() {
+  const turns = state.turns.length;
+  if (!turns) return null;
+  const lines = new Map();
+  const models = new Set();
+  let priced = 0;
+  let missingCounters = 0;
+  let inputTotal = 0;
+  let noCacheTotal = 0;
+  let provenance = null;
   state.turns.forEach((record) => {
     const cost = record.response && record.response.cost;
-    if (cost && typeof cost.total === 'number') { total += cost.total; turns += 1; }
+    if (!cost || typeof cost.total !== 'number') return;
+    priced += 1;
+    if (cost.cache_counters_reported === false) missingCounters += 1;
+    inputTotal += cost.input_total_tokens || 0;
+    noCacheTotal += cost.no_cache_total || 0;
+    if (cost.model) models.add(cost.model);
+    provenance = provenance || cost;
+    (cost.lines || []).forEach((line) => {
+      const kept = lines.get(line.key);
+      if (!kept) { lines.set(line.key, { ...line }); return; }
+      kept.quantity += line.quantity;
+      kept.amount += line.amount;
+      // A line is "reported" only if every turn it came from reported it.
+      kept.reported = kept.reported && line.reported;
+    });
   });
-  return turns ? { total, turns } : null;
+  if (!priced) return null;
+  const sums = Array.from(lines.values())
+    .map((line) => ({ ...line, amount: round6(line.amount) }));
+  // The total is the sum of the rows above it, exactly as a per-turn receipt
+  // is: a receipt whose rows do not add up to its total is not a receipt.
+  const total = round6(sums.reduce((sum, line) => sum + line.amount, 0));
+  const read = lines.get('cache_read');
+  const output = lines.get('output');
+  const search = lines.get('web_search');
+  return {
+    turns,
+    priced,
+    unpriced: turns - priced,
+    missingCounters,
+    models: Array.from(models),
+    lines: sums,
+    total,
+    input_total_tokens: inputTotal,
+    output_tokens: output ? output.quantity : null,
+    searches: search ? search.quantity : 0,
+    no_cache_total: round6(noCacheTotal),
+    savings: round6(noCacheTotal - total),
+    cache_hit_rate: inputTotal ? (read ? read.quantity : 0) / inputTotal : null,
+    rates_state: provenance.rates_state,
+    rates_date: provenance.rates_date,
+    rates_source: provenance.rates_source,
+    rates_error: provenance.rates_error
+  };
 }
 
 const COST_COLORS = {
@@ -289,12 +346,21 @@ const COST_STACK_ORDER = [
 ];
 const COST_GROUP_NAMES = { input: 'Input', output: 'Output', tools: 'Tools' };
 
-function noCostReason() {
+/* Why a figure is missing, in the terms the surface asking needs. Prices are
+   fetched rather than shipped, so "no estimate" has more than one honest
+   reason: the page could not be read, or this model is not on it. The rates
+   answer is read under the names the server sends - ``rates_state`` and
+   ``rates_error``; reading ``state``/``error`` here silently matched nothing
+   and left the first reason unreachable. */
+function noCostReason(scope) {
   if (!state.turns.length) return 'send a turn to see what it cost';
-  if (state.rates && state.rates.state === 'unavailable') {
-    return 'no rates: ' + (state.rates.error || 'the pricing page could not be read');
+  if (state.rates && state.rates.rates_state === 'unavailable') {
+    return 'no rates: '
+      + (state.rates.rates_error || 'the pricing page could not be read');
   }
-  return 'no cost estimate for this turn';
+  return scope === 'turn'
+    ? 'the pricing page does not cover this turn\u2019s model'
+    : 'no cost estimate for this conversation';
 }
 
 async function loadRates() {
@@ -307,42 +373,48 @@ async function loadRates() {
 }
 
 function renderCostBar() {
-  const cost = selectedCost();
+  const totals = conversationTotals();
   const toggle = byId('costToggle');
-  if (!cost) {
+  const scope = byId('costTokens');
+  const hit = byId('costHit');
+  toggle.disabled = !totals;
+  toggle.title = totals
+    ? 'Cost breakdown for this conversation · ' + totals.turns
+      + (totals.turns === 1 ? ' turn' : ' turns')
+    : 'Cost breakdown for this conversation';
+  if (!totals) {
     byId('costTotal').textContent = '–';
-    byId('costTokens').textContent = noCostReason();
-    byId('costHit').textContent = '';
-    toggle.disabled = true;
+    // The reason is a sentence, not a figure, and this is the only place it is
+    // ever said - the popover hides itself when there is nothing to total. So
+    // the whole of it rides along as the title: "no rates: the pricing page
+    // co…" is not a reason anyone can act on.
+    scope.textContent = noCostReason('conversation');
+    scope.title = scope.textContent;
+    hit.textContent = '';
     return;
   }
-  byId('costTotal').textContent = money(cost.total);
-  const output = costLine(cost, 'output');
-  const search = costLine(cost, 'web_search');
-  const parts = [
-    fmt(cost.input_total_tokens) + ' in',
-    (output ? fmt(output.quantity) : '–') + ' out'
-  ];
-  if (search && search.quantity > 0) {
-    parts.push(search.quantity + ' search' + (search.quantity === 1 ? '' : 'es'));
-  }
-  byId('costTokens').textContent = parts.join(' · ');
-  byId('costHit').textContent = cost.cache_hit_rate === null
+  byId('costTotal').textContent = money(totals.total);
+  // The turn count leads: it is what says this figure is the conversation's
+  // and not the turn the right pane happens to be showing.
+  //
+  // The token totals and the tool-call count are deliberately absent. The bar
+  // is one line that cannot wrap, and each of them was long enough to be the
+  // thing that got squeezed when the pane narrowed - a half-drawn
+  // "5.2k in · 81…" claims a precision this bar does not have, and it was
+  // never the figure that told you anything the receipt could not. Both are in
+  // the popover: the token totals as the receipt's own rows, the tool calls on
+  // its header line. What is left here is short enough to stay whole.
+  scope.textContent = totals.turns + (totals.turns === 1 ? ' turn' : ' turns');
+  scope.title = '';
+  hit.textContent = totals.cache_hit_rate === null
     ? ''
-    : 'cache ' + (cost.cache_hit_rate * 100).toFixed(1) + '% hit';
-  toggle.disabled = false;
+    : 'cache ' + (totals.cache_hit_rate * 100).toFixed(1) + '% hit';
 }
 
-function renderCostPop() {
-  const pop = byId('costPop');
-  const cost = selectedCost();
-  if (!cost) {
-    pop.hidden = true;
-    byId('costBar').classList.remove('open');
-    byId('costToggle').setAttribute('aria-expanded', 'false');
-    return;
-  }
-
+/* One receipt, drawn from the same line shape for a single turn and for the
+   whole conversation: the stacked bar, the grouped rows and the hit-rate
+   arithmetic are written once, so the two scopes cannot drift apart. */
+function costReceiptHtml(cost, { note = false } = {}) {
   const stack = COST_STACK_ORDER.map((key) => {
     const line = costLine(cost, key);
     if (!line || line.amount <= 0 || cost.total <= 0) return '';
@@ -398,33 +470,87 @@ function renderCostPop() {
       + '(caching off) — the cache lines read $0</div>';
   }
 
-  const session = sessionCost();
-  const sessionRow = session
-    ? '<div class="cost-session"><span>Session total</span><span class="num">'
-      + money(session.total) + ' · ' + session.turns
-      + ' turn' + (session.turns === 1 ? '' : 's') + '</span></div>'
-    : '';
-
-  // The rates are fetched, not shipped, so a turn priced from a stale cache
-  // has to say which one it is standing on.
-  const ratesLine = cost.rates_state === 'cached'
-    ? 'rates: cached copy from ' + esc(cost.rates_date)
-      + (cost.rates_error ? ' — ' + esc(String(cost.rates_error)) : '')
-    : 'rates: ' + esc(cost.rates_source) + ' ' + esc(cost.rates_date);
-
-  pop.innerHTML = '<h3>This turn — <span class="num">' + money(cost.total)
-    + '</span></h3>'
-    + '<div class="cost-src">' + ratesLine
-    + ' · estimated locally · ' + esc(cost.model || '')
-    + '</div>'
-    + '<div class="cost-stack">' + stack + '</div>'
+  return '<div class="cost-stack">' + stack + '</div>'
     + receipt
     + '<div class="cost-total-row"><span>Total</span><span class="num">'
     + money(cost.total) + '</span></div>'
     + cache
-    + '<p class="cost-note" id="cacheNote"></p>'
-    + sessionRow;
+    // The countdown's long sentence has one home, in the popover that is open.
+    // A second element with the same id would be a second writer to it.
+    + (note ? '<p class="cost-note" id="cacheNote"></p>' : '');
+}
+
+function renderCostPop() {
+  const pop = byId('costPop');
+  const totals = conversationTotals();
+  if (!totals) {
+    pop.hidden = true;
+    byId('costBar').classList.remove('open');
+    byId('costToggle').setAttribute('aria-expanded', 'false');
+    return;
+  }
+
+  // The rates are fetched, not shipped, so a total priced from a stale cache
+  // has to say which one it is standing on.
+  const ratesLine = totals.rates_state === 'cached'
+    ? 'rates: cached copy from ' + esc(totals.rates_date)
+      + (totals.rates_error ? ' — ' + esc(String(totals.rates_error)) : '')
+    : 'rates: ' + esc(totals.rates_source) + ' ' + esc(totals.rates_date);
+  // A conversation can change models between turns, so the header only names
+  // one when there is one.
+  const models = totals.models.length === 1
+    ? totals.models[0] : totals.models.length + ' models';
+
+  // The sum covers the turns that could be priced; the ones that could not are
+  // named rather than left to make the total look smaller than the truth.
+  const caveats = [];
+  if (totals.unpriced) {
+    caveats.push(totals.unpriced + ' of ' + totals.turns
+      + ' turns have no estimate and are not included above');
+  }
+  if (totals.missingCounters) {
+    caveats.push(totals.missingCounters
+      + (totals.missingCounters === 1 ? ' turn' : ' turns')
+      + ' reported no cache counters \u2014 '
+      + (totals.missingCounters === 1 ? 'its' : 'their')
+      + ' cache lines read $0');
+  }
+
+  pop.innerHTML = '<h3>Conversation — <span class="num">' + money(totals.total)
+    + '</span></h3>'
+    + '<div class="cost-src">' + ratesLine
+    + ' · estimated locally · ' + esc(models)
+    // The tool calls the bar used to count. They are counted here because a
+    // "12 searches" beside the total is the sort of figure that gets squeezed
+    // into nonsense on a narrow pane, and this is where the rows behind it are.
+    + (totals.searches
+      ? ' · ' + totals.searches + ' search' + (totals.searches === 1 ? '' : 'es')
+      : '')
+    + '</div>'
+    + costReceiptHtml(totals, { note: true })
+    + '<div class="cost-session"><span>Priced turns</span><span class="num">'
+    + totals.priced + ' of ' + totals.turns + '</span></div>'
+    + caveats.map((text) => '<div class="cost-caveat">' + esc(text)
+      + '</div>').join('');
   renderCacheStatus();
+}
+
+/* One turn's own receipt, shown by hovering its answer. The card is the same
+   fixed overlay #settingsCard uses - never a descendant of a bubble, and
+   pointer-events: none, so it cannot steal the click that picks the turn. */
+function costCardHtml(record, index) {
+  const head = '<h5>turn ' + (index + 1) + ' · cost</h5>';
+  const cost = record.response && record.response.cost;
+  if (!cost) {
+    return head + '<div class="cost-src">no estimate for this turn</div>'
+      + '<div class="sfoot">' + esc(noCostReason('turn')) + '</div>';
+  }
+  const provenance = cost.rates_state === 'cached'
+    ? ' · rates cached from ' + esc(cost.rates_date)
+    : '';
+  return head + '<div class="cost-src">estimated locally · '
+    + esc(cost.model || 'unknown model') + provenance + '</div>'
+    + costReceiptHtml(cost);
 }
 
 function toggleCost() {
@@ -1633,46 +1759,83 @@ function diffBetweenTurns(prevRecord, record) {
   return settingsDiffLines(prev, cur);
 }
 
+/* One hover card, two readers. Both bubbles answer a hover - the user's with
+   the settings that went out, the answer's with what it cost - and both are
+   read-only: #settingsCard is fixed and pointer-events: none, so it can never
+   swallow the click that picks the turn it is describing. The build function
+   is asked at hover time, so a card always describes the record it is over
+   rather than the one that existed when the bubble was wired. */
 let settingsCardTimer = null;
 
-function wireSettingsCard(div, turnIndex) {
+function placeHoverCard(card, anchor) {
+  const rect = anchor.getBoundingClientRect();
+  const width = card.offsetWidth;
+  const height = card.offsetHeight;
+  // The current bubble's own left edge, never off the side of the window.
+  card.style.left = Math.min(Math.max(8, rect.left),
+    Math.max(8, window.innerWidth - width - 8)) + 'px';
+  let top = rect.top - height - 8;
+  if (top < 8) top = rect.bottom + 8;
+  // A receipt is taller than a settings card; past the bottom of the window
+  // it is clamped rather than pushed out of reach.
+  card.style.top = Math.min(Math.max(8, top),
+    Math.max(8, window.innerHeight - height - 8)) + 'px';
+}
+
+function hoverCard(div, build, extraClass) {
+  if (!div) return;
   div.addEventListener('mouseenter', () => {
     clearTimeout(settingsCardTimer);
-    const record = state.turns[turnIndex];
-    if (!record) return;
-    const options = record.options || {};
-    const prev = turnIndex > 0 ? (state.turns[turnIndex - 1].options || {}) : null;
-    let html = '<h5>turn ' + (turnIndex + 1) + ' · as sent</h5>';
-    if (!Object.keys(options).length) {
-      // A conversation written elsewhere (llm -c, another plugin) has no
-      // sidecar row; the card says so instead of inventing values.
-      html += '<div class="srow"><span class="slabel">settings were not recorded'
-        + ' for this turn</span></div>';
-    } else {
-      html += CARD_FIELDS.map(([key, label, format]) => {
-        const value = format(options[key], options);
-        const diff = prev && Object.keys(prev).length
-          && String(options[key] ?? '') !== String(prev[key] ?? '');
-        return '<div class="srow' + (diff ? ' diff' : '') + '"><span class="slabel">'
-          + esc(label) + '</span><span class="svalue">' + esc(value) + '</span></div>';
-      }).join('');
-    }
-    html += '<div class="sfoot">absent fields = provider default · the Request'
-      + ' pane shows exactly what went out</div>';
+    const html = build();
+    if (!html) return;
     const card = byId('settingsCard');
+    // The class is set, not toggled: whichever card this is replaces the last
+    // one whole, so a receipt can never keep the settings card's width.
+    card.className = 'scard' + (extraClass ? ' ' + extraClass : '');
     card.innerHTML = html;
     card.hidden = false;
-    const rect = div.getBoundingClientRect();
-    const height = card.offsetHeight;
-    const x = Math.min(Math.max(8, rect.left), window.innerWidth - 276);
-    let y = rect.top - height - 8;
-    if (y < 8) y = rect.bottom + 8;
-    card.style.left = x + 'px';
-    card.style.top = y + 'px';
+    placeHoverCard(card, div);
   });
   div.addEventListener('mouseleave', () => {
     settingsCardTimer = setTimeout(() => { byId('settingsCard').hidden = true; }, 120);
   });
+}
+
+/* What the request asked for, on the bubble that made it. */
+function settingsCardHtml(turnIndex) {
+  const record = state.turns[turnIndex];
+  if (!record) return '';
+  const options = record.options || {};
+  const prev = turnIndex > 0 ? (state.turns[turnIndex - 1].options || {}) : null;
+  let html = '<h5>turn ' + (turnIndex + 1) + ' · as sent</h5>';
+  if (!Object.keys(options).length) {
+    // A conversation written elsewhere (llm -c, another plugin) has no
+    // sidecar row; the card says so instead of inventing values.
+    html += '<div class="srow"><span class="slabel">settings were not recorded'
+      + ' for this turn</span></div>';
+  } else {
+    html += CARD_FIELDS.map(([key, label, format]) => {
+      const value = format(options[key], options);
+      const diff = prev && Object.keys(prev).length
+        && String(options[key] ?? '') !== String(prev[key] ?? '');
+      return '<div class="srow' + (diff ? ' diff' : '') + '"><span class="slabel">'
+        + esc(label) + '</span><span class="svalue">' + esc(value) + '</span></div>';
+    }).join('');
+  }
+  html += '<div class="sfoot">absent fields = provider default · the Request'
+    + ' pane shows exactly what went out</div>';
+  return html;
+}
+
+function wireSettingsCard(div, turnIndex) {
+  hoverCard(div, () => settingsCardHtml(turnIndex), '');
+}
+
+function wireTurnCostCard(div, turnIndex) {
+  hoverCard(div, () => {
+    const record = state.turns[turnIndex];
+    return record ? costCardHtml(record, turnIndex) : '';
+  }, 'costcard');
 }
 
 /* The cache prefix is system + tools + messages, so only a change to the
@@ -2265,12 +2428,11 @@ byId('tabRequest').addEventListener('click', () => setTab('request'));
 byId('tabResponse').addEventListener('click', () => setTab('response'));
 byId('prompt').addEventListener('input', () => {
   // Typing starts a new request, so nothing in the conversation is selected
-  // any more: the footer has to stop showing the turn that was, or an old
-  // total keeps sitting under a request that is not built yet.
+  // any more: the Request pane has to stop showing the turn that was. The
+  // footer is unmoved by this - it totals the conversation, not the selection.
   state.selected = null;
   markSelected();
   renderPane();
-  refreshCost();
 });
 
 /* --- conversations ----------------------------------------------------------- */
@@ -2634,7 +2796,7 @@ async function openConversation(id) {
     wireBubble(assistant.parentElement, index, 'response',
       'Show the response this turn came back with');
     wireSettingsCard(user.parentElement, index);
-    wireSettingsCard(assistant.parentElement, index);
+    wireTurnCostCard(assistant.parentElement, index);
   });
   // Opening a conversation lands at its end, where the next turn goes.
   pinnedToBottom = true;
@@ -2662,7 +2824,6 @@ function showTurn(index, tab) {
   // back. Without a tab the pane keeps whatever it was showing.
   setTab(tab || state.tab);
   markSelected();
-  refreshCost();
 }
 
 async function startNewConversation() {
@@ -2908,7 +3069,7 @@ byId('send').addEventListener('click', async () => {
         wireBubble(body.parentElement, state.selected, 'response',
           'Show the response this turn came back with');
         wireSettingsCard(userBody.parentElement, state.selected);
-        wireSettingsCard(body.parentElement, state.selected);
+        wireTurnCostCard(body.parentElement, state.selected);
         showToolUse(bubble, event.record.response.server_tool_blocks);
         showSources(bubble, event.record.response.citations);
         attachMeta(body, event.record.response);

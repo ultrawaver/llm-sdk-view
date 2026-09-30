@@ -371,19 +371,22 @@ def test_the_page_looks_again_for_a_count_that_is_still_running(static_page):
     assert "contextLooksLeft <= 0" in static_page
 
 
-def test_typing_a_message_repaints_the_cost_footer(static_page):
-    """Clearing the selection has to reach the footer too.
+def test_typing_a_message_clears_the_selection(static_page):
+    """Typing drops the selected turn, and that has to reach the panes.
 
-    Typing drops the selected turn, but the cost bar kept rendering it until
-    something else happened to refresh it: an old total stayed under a request
-    that had not been built yet.
+    The cost bar used to be part of this: it rendered the *selected* turn, so
+    an old total stayed under a request that had not been built yet. The footer
+    is the conversation's own total now (test_cost_scopes.py), which the
+    selection cannot make stale - so typing no longer repaints it, and this
+    pins both halves.
     """
     flat = " ".join(static_page.split())
 
     assert "byId('prompt').addEventListener('input', () => {" in flat
     # markSelected() is the same event reaching the bubbles: a turn that is
     # no longer selected must stop looking like the one in the pane.
-    assert "state.selected = null; markSelected(); renderPane(); refreshCost();" in flat
+    assert "state.selected = null; markSelected(); renderPane(); }" in flat
+    assert "renderPane(); refreshCost(); }" not in flat
 
 
 def test_adaptive_models_report_their_own_window(make_session):

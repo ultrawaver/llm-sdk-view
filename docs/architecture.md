@@ -127,16 +127,60 @@ Two display rules fall out of the honesty rules:
   and falls back to the provider's own level for one this model cannot send.
 
 History shows each turn's settings through the same honesty lens: a hover card
-per bubble read from the turn's stored `effective_options` (a turn with no
-sidecar row says "not recorded"), a dashed divider between turns whose stored
-settings differ, and a composer hint naming what the next turn changes about
-the last one. The hint has two classes, because only one of them can cost
+on the request bubble read from the turn's stored `effective_options` (a turn
+with no sidecar row says "not recorded"), a dashed divider between turns whose
+stored settings differ, and a composer hint naming what the next turn changes
+about the last one. The hint has two classes, because only one of them can cost
 something: a field inside the cache prefix (model, system, the web-search
 tool's shape) says the cached prefix will not be reused, while `max_tokens`,
 `effort`, `thinking` and `allowed_callers` are named as a difference and never
 as a cache miss. Reopening a conversation puts its own stored settings back on
 the form first, so the hint stays silent about differences the user did not
 cause.
+
+## Two cost scopes, one receipt
+
+A cost figure belongs either to a turn or to the conversation, and the two are
+shown in different places so that neither has to guess which it is:
+
+- **The footer is the conversation's.** `conversationTotals()` sums every turn
+  the session holds, and the bar leads with the turn count for exactly that
+  reason. Clicking a bubble decides what the right pane shows and moves
+  nothing here.
+- **A turn's receipt is on its answer.** Hovering the assistant bubble shows
+  that turn's own composition bar, its Input/Output/Tools rows with unit
+  rates, its total and its saving against no cache. Hovering the request
+  bubble shows the settings that went out - the same card for both was two
+  copies of one fact and left the answer with nowhere to put its figures.
+
+Both scopes are drawn by one `costReceiptHtml()`, and the conversation's total
+is built from the turns' receipt *lines* rather than re-derived from their
+totals: one definition of a line, so the two cannot disagree about what a cache
+read cost, and a total is always the sum of the rows printed above it.
+
+Two honesty rules survive the summing. A turn whose model the pricing page does
+not cover gets no estimate, so the popover counts those turns out loud ("1 of 2
+turns have no estimate and are not included above") rather than reporting a
+total quietly smaller than the conversation; and a turn that reported no cache
+counters is named for the same reason.
+
+The bar carries only figures it can show whole, and that is a rule rather than
+a hope. The token totals left it: they were the widest thing there, so they
+were the first to be cut when the pane narrowed, and a half-drawn
+`5.2k in · 81…` claims a precision the bar does not have. The tool-call count
+went with them, for the same reason and into the same place - the popover,
+where the tokens are the receipt's own rows and the searches are on its header
+line. What is left is the scope (`2 turns`), the total, the cache hit rate and
+the countdown.
+
+Making one cell elastic is what this replaced, and it only moved the defect
+along: with the hit rate as the shrinkable cell it was drawn 82px wide for
+104px of text at 1100px, 44px at 1024px and 12px at 960px. Now the bar's
+wrapper is a query container (`container-type: inline-size`, so it follows the
+pane rather than the window), and below the width at which every cell fits at
+its natural width (418px, measured) the hit rate is dropped instead of halved.
+It is the one figure the bar can do without - it is derived from the receipt's
+own lines, which print the arithmetic in full.
 
 ## Control status
 

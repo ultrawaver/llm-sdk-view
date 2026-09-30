@@ -1017,6 +1017,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .scard[hidden] { display: none; }
 
+/* A turn's receipt has four columns and a composition bar in it; the settings
+   card is two columns of short values. One card, two widths - the receipt one
+   is only used while the card actually holds a receipt. */
+.scard.costcard { width: 392px; }
+
 .scard h5 {
   margin: 0 0 7px;
   font-size: 10.5px;
@@ -1222,8 +1227,10 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* --- cost footer --------------------------------------------------------------- */
 
 /* Collapsed: one line. Expanded: a popover that floats above the bar and
-   never moves the layout - the same contract as the params panel. */
-.costwrap { position: relative; }
+   never moves the layout - the same contract as the params panel. It is also
+   the query container for the bar's own width: what narrows when the window
+   does is the pane, not the viewport, so the bar has to ask about the pane. */
+.costwrap { position: relative; container-type: inline-size; }
 
 .costbar {
   display: flex;
@@ -1240,9 +1247,34 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .cost-chip { color: var(--text); font-weight: 600; }
 
-.cost-tokens { overflow: hidden; text-overflow: ellipsis; }
+/* The bar is one line that can neither wrap nor scroll, so room runs out
+   before figures do - and what gives way is never a figure drawn in half. The
+   total, the turn count and the countdown badge are each the only place on
+   screen that says what they say, so they hold their width. */
+.cost-chip, .cost-tokens, .cost-ttl, .cost-toggle, .cost-hit { flex: none; }
+
+.cost-tokens {
+  /* The one elastic cell, because it holds either a three-word scope
+     ("2 turns") or the sentence that says why there is no estimate at all.
+     A sentence that runs out of room may trail off; a figure may not. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .cost-hit { color: var(--ok); }
+
+/* The hit rate is the one figure the bar can do without, so it is the one
+   that is dropped rather than squeezed: it is derived from the receipt's own
+   lines, and the popover prints that arithmetic in full. Below this width it
+   is absent - not abbreviated to "cache 72.7…", which is a number wearing a
+   confidence it does not have. The threshold is measured, not guessed: with
+   every cell at its natural width the bar comes to 418px, and the slack on
+   top is for a longer total. */
+@container (max-width: 459px) {
+  .cost-hit { display: none; }
+}
 
 /* The cache countdown is a status, not just a number: it wears the same
    escalation ladder every countdown timer uses, so the colour says how
@@ -1341,9 +1373,20 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .costpop h3 { margin: 0 0 2px; font-size: 12px; font-weight: 600; }
 
-.costpop .cost-src { font-size: 10.5px; color: var(--text-faint); margin-bottom: 10px; }
+/* The receipt is drawn in two places - the footer's popover, which totals the
+   conversation, and the card a hover puts over an answer, which totals that
+   turn - so its type rules are stated for both rather than for the popover
+   alone. */
+.costpop .cost-src, .scard .cost-src {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-bottom: 10px;
+}
 
-.costpop .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.costpop .num, .scard .num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
 
 /* the composition bar: the shape of the cost at a glance */
 .cost-stack {
@@ -1449,6 +1492,15 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-size: 11.5px;
   display: flex;
   justify-content: space-between;
+}
+
+/* What the total leaves out: a turn that could not be priced is named here,
+   never quietly dropped from the sum. */
+.cost-caveat {
+  color: var(--warn);
+  font-size: 11px;
+  margin-top: 6px;
+  line-height: 1.45;
 }
 
 /* segment colours, shared by the stack and the receipt dots */
