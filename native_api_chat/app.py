@@ -130,6 +130,18 @@ def _preview_session(payload: dict) -> ChatSession:
     )
 
 
+def _no_key(ex: MissingKeyError) -> JSONResponse:
+    """One answer for a missing key, so every route says the same thing.
+
+    Building a session can now fail this way, not just sending from one: a
+    plugin that registers no models without a key makes a missing key look
+    like an unknown model, and the provider is asked which it is while the
+    session is still being built. A route that only guarded the send saw it
+    as an unhandled error and answered 500.
+    """
+    return JSONResponse({"error": "missing_api_key", "detail": str(ex)}, status_code=400)
+
+
 def _keep(session: ChatSession, record: dict) -> dict:
     """Write a finished turn to llm's own database.
 
@@ -198,7 +210,7 @@ async def chat(request: Request) -> JSONResponse:
         session = _session(payload)
         result = session.run_turn(payload["text"])
     except MissingKeyError as ex:
-        return JSONResponse({"error": "missing_api_key", "detail": str(ex)}, status_code=400)
+        return _no_key(ex)
     except (KeyError, TypeError, ValueError) as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
     except Exception as ex:  # noqa: BLE001 - a provider failure is still an answer
@@ -215,6 +227,8 @@ async def chat_stream(request: Request) -> StreamingResponse:
         return JSONResponse({"error": "text must not be empty"}, status_code=400)
     try:
         session = _session(payload)
+    except MissingKeyError as ex:
+        return _no_key(ex)
     except (KeyError, TypeError, ValueError) as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
 
@@ -265,6 +279,10 @@ async def preview(request: Request) -> JSONResponse:
     try:
         session = _preview_session(payload)
         prepared = session.prepare(text)
+    except MissingKeyError as ex:
+        # A preview sends nothing, but it cannot be built either: without a key
+        # llm-openrouter offers no models, so there is no model to build with.
+        return _no_key(ex)
     except (KeyError, TypeError, ValueError) as ex:
         # Refusing early is the feature: an illegal combination is caught while
         # it is still free to fix.

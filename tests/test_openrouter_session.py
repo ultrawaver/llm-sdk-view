@@ -279,6 +279,23 @@ def test_no_key_is_ever_rendered_or_returned(client, openrouter_registry, fake_o
     assert 'os.environ["OPENROUTER_KEY"]' in body["code"]
 
 
+@pytest.mark.parametrize("route", ["/api/preview", "/api/chat", "/api/chat/stream"])
+def test_every_route_answers_a_missing_key_rather_than_failing(
+    client, openrouter_registry, monkeypatch, route
+):
+    """A missing key now surfaces while the session is being built, which is
+    before the guard each route used to have. Two of the three answered 500."""
+    (model_id,) = openrouter_registry("openai/gpt-5.4")
+    llm.get_model(model_id)
+    monkeypatch.delenv("OPENROUTER_KEY", raising=False)
+
+    response = client.post(route, json={"text": "hello", "model": model_id})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "missing_api_key"
+    assert "OPENROUTER_KEY" in response.json()["detail"]
+
+
 def test_a_keyless_machine_is_told_about_the_key_not_the_model(
     openrouter_registry, monkeypatch
 ):
