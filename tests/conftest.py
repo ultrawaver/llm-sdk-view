@@ -26,6 +26,7 @@ import pytest
 import uvicorn
 
 import native_api_chat
+from native_api_chat import app as app_module
 from native_api_chat import capabilities as capabilities_module
 from native_api_chat import model_api, openrouter_api, rates_page
 from native_api_chat.app import create_app
@@ -317,10 +318,18 @@ def transports() -> list:
 def isolated_history(monkeypatch, tmp_path_factory):
     root = tempfile.mkdtemp(prefix="native-api-chat-logs-")
     monkeypatch.setenv("NATIVE_API_CHAT_LOGS_DB", os.path.join(root, "logs.db"))
+    # The application's live sessions are module state, so they outlive the
+    # database this fixture just replaced. A second test that sends the same
+    # model reuses the first one's ChatSession - and with it a conversation
+    # whose storage has been deleted - which reads as a send that silently
+    # produces no turn. The browser tests are the ones that notice, because
+    # each of them drives a whole app in this same process.
+    app_module.SESSIONS.clear()
     _FinalMessage.SCENARIO = None
     try:
         yield root
     finally:
+        app_module.SESSIONS.clear()
         _FinalMessage.SCENARIO = None
         shutil.rmtree(root, ignore_errors=True)
 

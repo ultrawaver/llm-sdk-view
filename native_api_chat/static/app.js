@@ -3068,21 +3068,17 @@ function clearDraft() {
    capabilities: a stored value is only restorable while the model still
    offers it, and a control the runtime cannot honour keeps its status
    rather than being silently switched. */
+/* A value this model no longer offers stays at the model's default: writing
+   it anyway would show a request the control cannot make. */
+function restoreChoice(id, value) {
+  if (value === null || value === undefined || value === '') return;
+  const select = byId(id);
+  const known = Array.from(select.options).some((o) => o.value === String(value));
+  if (known) select.value = String(value);
+}
+
 function applyStoredOptions(options) {
   if (!options || !Object.keys(options).length) return;
-
-  const restore = (id, value) => {
-    if (value === null || value === undefined || value === '') return;
-    const select = byId(id);
-    // A value this model no longer offers stays at the model's default.
-    // Writing it anyway would show a request the control cannot make.
-    const known = Array.from(select.options).some((o) => o.value === String(value));
-    if (known) select.value = String(value);
-  };
-  restore('thinking', options.thinking);
-  restore('webSearchType', options.web_search_type);
-  restore('allowedCallers', options.allowed_callers);
-  restore('responseInclusion', options.response_inclusion);
 
   if (typeof options.system === 'string') byId('system').value = options.system;
   if (typeof options.max_tokens === 'number') {
@@ -3090,24 +3086,63 @@ function applyStoredOptions(options) {
     const value = ceiling ? Math.min(options.max_tokens, ceiling) : options.max_tokens;
     byId('maxTokens').value = value;
   }
+  // The two fields both APIs have.
   if (typeof options.max_uses === 'number') byId('maxUses').value = options.max_uses;
   if (typeof options.web_search === 'boolean') {
     byId('webSearch').value = options.web_search ? 'true' : 'false';
   }
+
+  // The rest are the sending provider's own fields, and only that provider's
+  // are touched. Restoring both sets used to end in the two Anthropic state
+  // functions below, which read `controls.thinking` and
+  // `controls.budget_tokens` - fields no OpenRouter schema carries. The throw
+  // happened before openConversation's render loop, so a stored OpenRouter
+  // conversation opened with no transcript at all and its settings
+  // half-applied, and nothing on screen said why.
+  if (providerId() === 'openrouter') restoreOpenRouterOptions(options);
+  else restoreAnthropicOptions(options);
+  refresh();
+}
+
+function restoreAnthropicOptions(options) {
+  restoreChoice('thinking', options.thinking);
+  restoreChoice('webSearchType', options.web_search_type);
+  restoreChoice('allowedCallers', options.allowed_callers);
+  restoreChoice('responseInclusion', options.response_inclusion);
   if (typeof options.cache_control === 'boolean') {
     byId('cacheControl').value = options.cache_control ? 'true' : 'false';
   }
 
   applyThinkingState();
-  // Effort is not written above like the others: its option list is rebuilt
-  // from the restored thinking, and a rebuild that ran after a plain write
-  // would wipe it. That wipe left a reopened conversation on "default" and
-  // then had the composer report the stored level as a change the user had
-  // made. The stored level goes to the rebuild instead, which keeps it when
-  // this model still offers it and falls back to the provider's own level
-  // when it does not.
+  // Effort is not written like the others: its option list is rebuilt from
+  // the restored thinking, and a rebuild that ran after a plain write would
+  // wipe it. That wipe left a reopened conversation on "default" and then had
+  // the composer report the stored level as a change the user had made. The
+  // stored level goes to the rebuild instead, which keeps it when this model
+  // still offers it and falls back to the provider's own level when it does
+  // not.
   applyEffortState(options.effort);
-  refresh();
+}
+
+function restoreOpenRouterOptions(options) {
+  restoreChoice('chatCompletions', options.chat_completions);
+  restoreChoice('reasoningEffort', options.reasoning_effort);
+  restoreChoice('reasoningSummary', options.reasoning_summary);
+  restoreChoice('searchContextSize', options.search_context_size);
+  if (typeof options.reasoning_max_tokens === 'number') {
+    byId('reasoningMaxTokens').value = options.reasoning_max_tokens;
+  }
+  // Three states, and the third is not a value: untouched is not a request
+  // for `enabled: false`, so only a real boolean is restored.
+  if (typeof options.reasoning_enabled === 'boolean') {
+    byId('reasoningEnabled').value = options.reasoning_enabled ? 'true' : 'false';
+  }
+  // Stored as the object that was sent; the field holds the JSON the user
+  // typed. Re-serialised rather than kept as text, because what the turn
+  // carried is the object.
+  if (options.routing && typeof options.routing === 'object') {
+    byId('routing').value = JSON.stringify(options.routing);
+  }
 }
 
 /* A stored conversation can point at a model the list no longer offers,

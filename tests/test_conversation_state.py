@@ -41,8 +41,17 @@ def test_a_reopened_conversation_continues_its_own_settings(static_page):
     assert "await loadForm(); applyStoredOptions(lastOptions);" not in flat
     assert "const wantedModel = lastOptions.model;" in flat
     assert "await loadForm();" in flat
-    # A stored value this model cannot send is not written.
-    assert "A value this model no longer offers stays at the model's default." in flat
+    # A stored value this model cannot send is not written. The rule itself
+    # is measured in a browser by
+    # test_a_value_the_model_no_longer_offers_is_not_written; only the seam
+    # is named here, because the sentence it used to quote moved into the
+    # helper when restoring was split per provider.
+    assert "function restoreChoice(id, value)" in flat
+    # Each provider restores its own fields. Both sets used to be written,
+    # which ended in Anthropic's state functions reading controls no
+    # OpenRouter schema carries - and the throw took the transcript with it.
+    assert "if (providerId() === 'openrouter') restoreOpenRouterOptions(options);" in flat
+    assert "else restoreAnthropicOptions(options);" in flat
     # The list narrows to one model per series, so a conversation older than
     # the release now points outside it: that id is added back, marked, not
     # silently swapped for whatever superseded it.

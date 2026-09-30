@@ -50,6 +50,30 @@ SHARED_MENUS = {
 
 
 @pytest.fixture
+def sending(openrouter_registry, fake_openrouter, browser, live_app):
+    """The same page, with the OpenRouter transport scripted.
+
+    Real turns, stored in the real sidecar, without a key or a network: only
+    the OpenAI client is replaced, so ``llm-openrouter``'s own ``execute``
+    still builds and reads the request.
+    """
+    openrouter_registry("openai/gpt-5.4")
+    fake_openrouter.answers("Hi there.")
+    context = browser.new_context(viewport={"width": 1500, "height": 820})
+    page = context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.errors = errors
+    page.goto(live_app)
+    page.wait_for_selector('#settingsPills [data-pill="model"]')
+    page.wait_for_function("() => (state.data.provider.options || []).length > 1")
+    try:
+        yield page
+    finally:
+        context.close()
+
+
+@pytest.fixture
 def switchable(openrouter_registry, browser, live_app):
     """The live page with both providers usable.
 
@@ -359,3 +383,96 @@ def test_send_is_available_on_an_openrouter_model(switchable):
 
     assert page.is_enabled("#send")
     assert page.text_content("#blockedNote") == ""
+
+
+# --- reopening one, which is where the assumption bit hardest ----------------
+
+
+def test_reopening_an_openrouter_conversation_shows_it(sending):
+    """The reported defect: a stored OpenRouter conversation opened empty.
+
+    ``applyStoredOptions`` ended by calling the two Anthropic state
+    functions, which read ``controls.thinking`` and ``controls.budget_tokens``
+    - fields no OpenRouter schema carries. It threw, and the throw was
+    *before* the loop that appends the bubbles, so the transcript never
+    rendered and the settings were left half-applied. Nothing said so: the
+    exception is asynchronous and the page just sat there looking loaded.
+    """
+    page = sending
+    switch_to(page, "openrouter")
+    page.fill("#prompt", "hello")
+    page.click("#send")
+    page.wait_for_function("() => state.turns.length === 1")
+    page.click("#newConversation")
+    page.wait_for_function("() => state.turns.length === 0")
+
+    page.click(".conversation")
+    page.wait_for_function("() => state.turns.length === 1")
+
+    assert page.errors == []
+    assert page.locator("#messages .msg").count() == 2
+    assert "Hi there." in page.text_content("#messages")
+    assert page.evaluate("() => state.data.provider.id") == "openrouter"
+
+
+def test_a_reopened_conversation_gets_its_own_providers_settings_back(sending):
+    """Settings belong to the conversation, so reopening must not quietly
+    change the request - and an OpenRouter conversation's settings are
+    OpenRouter's fields, none of which were restored."""
+    page = sending
+    switch_to(page, "openrouter")
+    page.evaluate(
+        """() => {
+            setControl('reasoningEffort', 'high');
+            setControl('chatCompletions', 'true');
+            setControl('system', 'Answer in one sentence.');
+            setControl('maxTokens', 4096);
+        }"""
+    )
+    page.fill("#prompt", "hello")
+    page.click("#send")
+    page.wait_for_function("() => state.turns.length === 1")
+    page.click("#newConversation")
+    page.wait_for_function("() => state.turns.length === 0")
+
+    page.click(".conversation")
+    page.wait_for_function("() => state.turns.length === 1")
+
+    assert page.input_value("#reasoningEffort") == "high"
+    assert page.input_value("#chatCompletions") == "true"
+    assert page.input_value("#system") == "Answer in one sentence."
+    assert page.input_value("#maxTokens") == "4096"
+    # And the pills read the same thing, since the row is what the user sees.
+    assert "high" in page.text_content('[data-pill="reasoning"]')
+    assert "chat.completions" in page.text_content('[data-pill="transport"]')
+
+
+def test_reopening_hands_the_form_back_to_the_conversations_own_provider(sending):
+    """A conversation carries its provider, because it carries its model.
+
+    Reopening one sent through the other provider has to change the whole
+    form back - controls, model list and pills - or the next turn would
+    continue it under settings it was never sent with.
+    """
+    page = sending
+    switch_to(page, "openrouter")
+    page.fill("#prompt", "hello")
+    page.click("#send")
+    page.wait_for_function("() => state.turns.length === 1")
+    switch_to(page, "anthropic")
+
+    page.click(".conversation")
+    page.wait_for_function("() => state.data.provider.id === 'openrouter'")
+    page.wait_for_timeout(50)
+
+    assert page.errors == []
+    assert page.locator("#messages .msg").count() == 2
+    assert set(OPENROUTER_PILLS) <= set(pills_on_screen(page))
+    assert set(ANTHROPIC_PILLS).isdisjoint(pills_on_screen(page))
+    # The model it was sent with, offered as a current model rather than
+    # marked legacy: it is the other provider's, not a superseded one.
+    assert page.input_value("#model") == "openrouter/openai/gpt-5.4"
+    assert page.evaluate(
+        "() => byId('model').selectedOptions[0].dataset.superseded"
+    ) is None
+    assert "legacy" not in page.text_content('[data-pill="model"]')

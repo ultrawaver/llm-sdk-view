@@ -825,3 +825,16 @@ been sent at `xhigh` thirteen turns running. The user had changed nothing.
   browser: hit tests inside each pill's own rectangle, every menu opened at
   two widths, the row checked for pills stranded past the unscrollable start
   edge, and uncaught page errors collected rather than assumed absent.
+- **Fixed: a stored OpenRouter conversation reopened empty.** `applyStoredOptions`
+  ended in the two Anthropic state functions, which read `controls.thinking` and
+  `controls.budget_tokens` - fields no OpenRouter schema carries. It threw, and
+  the throw was *before* `openConversation`'s render loop, so the transcript
+  never appeared and the settings were left half-applied with nothing on screen
+  to say why. Each provider now restores its own fields, and an OpenRouter
+  conversation gets its transport, reasoning and routing back rather than
+  nothing at all.
+- The suite's per-test database swap left the application's live sessions
+  behind, because `SESSIONS` is module state. A second test sending the same
+  model reused the first one's `ChatSession`, and with it a conversation whose
+  storage had been deleted - which read as a send that silently produced no
+  turn. Cleared with the database it belongs to.
