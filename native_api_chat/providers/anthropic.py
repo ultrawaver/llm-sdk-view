@@ -357,6 +357,9 @@ class AnthropicProvider:
     # Which SDK the rendered code is for. Named rather than assumed, because
     # the page says it out loud above the pane.
     sdk = "anthropic-python"
+    # messages.count_tokens is Anthropic's own, free, and the reason the
+    # context figure can be exact before a turn is sent.
+    counts_tokens = True
 
     def owns(self, model_id: str) -> bool:
         """Claimed by prefix, and deliberately not as a catch-all.

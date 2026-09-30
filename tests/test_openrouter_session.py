@@ -182,6 +182,53 @@ def test_the_context_figure_follows_the_reported_usage(session):
     assert after["limit"] == 1_000_000
 
 
+# --- what must not be asked -------------------------------------------------
+
+
+def test_anthropics_counter_is_never_asked_about_an_openrouter_turn(
+    client, openrouter_registry, fake_openrouter, monkeypatch
+):
+    """The counter is one provider's, and it is handed the request just built.
+
+    The Chat Completions request carries ``messages``, which is exactly the
+    field ``count_tokens`` wants, so the call would be well-formed enough to
+    succeed - posting an OpenRouter conversation to Anthropic under the user's
+    Anthropic key. The Responses request carries no messages and would fail,
+    but only after the same round trip, and it would leave the real counter in
+    its failure cooldown.
+    """
+    from native_api_chat import token_count
+
+    asked: list[dict] = []
+    monkeypatch.setattr(token_count, "lookup", lambda kwargs: asked.append(kwargs))
+    monkeypatch.setattr(token_count, "kick", lambda kwargs: asked.append(kwargs))
+    (model_id,) = openrouter_registry("openai/gpt-5.4")
+
+    for transport in (False, True):
+        response = client.post(
+            "/api/preview",
+            json={"text": "hello", "model": model_id, "chat_completions": transport},
+        )
+        assert response.status_code == 200
+
+    assert asked == []
+
+
+def test_the_context_figure_says_it_is_an_estimate_when_nobody_counted(
+    client, openrouter_registry, fake_openrouter
+):
+    """No counter and no turn yet leaves the estimate, and it has to say so
+    rather than present a guess as the provider's own number."""
+    (model_id,) = openrouter_registry("openai/gpt-5.4")
+
+    body = client.post(
+        "/api/preview", json={"text": "hello", "model": model_id}
+    ).json()
+
+    assert body["context"]["source"] == "estimated"
+    assert body["context"]["pending"] is False
+
+
 # --- the route --------------------------------------------------------------
 
 

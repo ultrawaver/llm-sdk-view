@@ -277,7 +277,10 @@ async def preview(request: Request) -> JSONResponse:
     already_answered = session.baseline_usage is not None and not text.strip()
     counted = None
     pending = False
-    if not already_answered:
+    # Only the provider that owns the counter may be asked for a count. The
+    # payload handed over is the request just built, so counting an OpenRouter
+    # turn here would mean posting it to Anthropic.
+    if not already_answered and session.provider.counts_tokens:
         counted = token_count.lookup(prepared.kwargs)
         if counted is None:
             pending = token_count.kick(prepared.kwargs)

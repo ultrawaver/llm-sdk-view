@@ -604,6 +604,12 @@ class OpenRouterProvider:
     # OpenRouter is reached through the OpenAI SDK pointed at openrouter.ai,
     # so that is the library the rendered code imports and the page names.
     sdk = "openai-python"
+    # OpenRouter publishes no token counter, so there is no exact figure to be
+    # had before a turn is sent. Asking Anthropic's would be worse than not
+    # asking: the Chat Completions request carries `messages`, which is the
+    # field count_tokens wants, so the call would be well-formed enough to
+    # send this conversation to a provider that has nothing to do with it.
+    counts_tokens = False
 
     def owns(self, model_id: str) -> bool:
         return model_id.startswith(MODEL_PREFIX)

@@ -72,6 +72,16 @@ class Provider(Protocol):
     id: str
     label: str
 
+    #: Whether this provider's API has a free token counter to ask.
+    #:
+    #: ``token_count`` is Anthropic's ``messages.count_tokens``, and the only
+    #: thing it is given is the request just built. That request is the wrong
+    #: shape for anyone else - and the Chat Completions shape is close enough
+    #: to be accepted, which would send an OpenRouter conversation to Anthropic
+    #: under the user's Anthropic key. A provider without a counter says so and
+    #: the context figure falls to the next source down, labelled.
+    counts_tokens: bool
+
     def owns(self, model_id: str) -> bool:
         """Whether this provider is the one that sends ``model_id``."""
 
