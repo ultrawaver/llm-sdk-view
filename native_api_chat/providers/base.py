@@ -87,3 +87,27 @@ class Provider(Protocol):
         self, model: Any, prompt: Any, conversation: Any, options: Any
     ) -> dict:
         """The complete request, exactly as it reaches the SDK call."""
+
+    def unavailable(self, model_id: str, error: Exception) -> Exception:
+        """Why ``llm`` has no model under this id, as the error to raise.
+
+        A plugin that registers nothing without a key makes every one of its
+        models look unknown, and "unknown model" sends the user looking for a
+        typo instead of for their key. Only the provider knows which of the two
+        it is, so only the provider may name it.
+        """
+
+    def blocks(self, message: dict) -> list[dict]:
+        """The finished reply, as the content blocks a record is made of.
+
+        The wire shapes disagree as much as the requests do. Anthropic ends
+        with a list of typed blocks; OpenRouter's Chat Completions path ends
+        with ``content`` as a plain string, and its Responses path puts the
+        reply under ``output`` and calls a text part ``output_text``. Iterating
+        one shape as though it were another either finds nothing or walks a
+        string character by character.
+
+        Translating here rather than at each reader keeps the record - and so
+        the transcript, the export and the panes - on one block vocabulary,
+        which is the only reason those three can be read by the same code.
+        """

@@ -20,6 +20,7 @@ belongs to, or the page teaches the user two dialects of the same idea.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 
 # Every control reports one of these, so a value the form cannot set always
 # says what would have to change for it to become settable.
@@ -78,3 +79,48 @@ class TurnOptions:
 def option_list(values, disabled=()) -> list[dict]:
     """A control's choices, each carrying whether it can be picked."""
     return [{"value": value, "disabled": value in disabled} for value in values]
+
+
+# The last-resort estimate, measured against Anthropic's own free counter on
+# 2026-09-27. Latin text really is about four characters per token - the old
+# single rule was right about English and wrong about everything else: Chinese
+# and Japanese measure at roughly one token per character, so a rule of four
+# under-counted a Chinese conversation four-fold. A message envelope (the few
+# tokens an API adds around a message) is left out, which is part of why this
+# is a fallback and not the figure the meter prefers.
+LATIN_CHARS_PER_TOKEN = 4
+CJK_CHARS_PER_TOKEN = 1
+
+
+def _is_cjk(character: str) -> bool:
+    """Characters the four-characters-per-token rule cannot speak for.
+
+    Chinese, Japanese kana and Korean hangul all measure at roughly one token
+    per character, so counting them as a quarter of one is not a rounding
+    error, it is a different number.
+    """
+    code = ord(character)
+    return (
+        0x3000 <= code <= 0x30FF  # CJK punctuation, hiragana, katakana
+        or 0x3400 <= code <= 0x4DBF  # CJK ideographs, extension A
+        or 0x4E00 <= code <= 0x9FFF  # CJK ideographs, unified
+        or 0xAC00 <= code <= 0xD7AF  # hangul syllables
+        or 0xF900 <= code <= 0xFAFF  # CJK compatibility ideographs
+        or 0xFF00 <= code <= 0xFFEF  # fullwidth forms
+        or 0x20000 <= code <= 0x2FA1F  # CJK ideographs, extensions B onward
+    )
+
+
+def estimate_text(text: str) -> int:
+    """A character-count estimate of one string, in tokens.
+
+    Provider-neutral because the rule is about writing systems rather than
+    about an API. What is *not* neutral is which parts of a request can be
+    counted this way, so each provider walks its own request shape and calls
+    this for the text it finds.
+    """
+    if not text:
+        return 0
+    wide = sum(1 for character in text if _is_cjk(character))
+    narrow = len(text) - wide
+    return max(1, ceil(narrow / LATIN_CHARS_PER_TOKEN) + ceil(wide / CJK_CHARS_PER_TOKEN))

@@ -10,9 +10,53 @@ requests whose ``max_tokens`` could run past ten minutes.
 from __future__ import annotations
 
 import inspect
+import json
+from dataclasses import dataclass, replace
 from typing import Any
 
+from ..capabilities import (
+    DEFAULT_EFFORT,
+    DEFAULT_MODEL,
+    EFFORT_LEVELS_NEEDING_THINKING,
+    THINKING_OFF,
+    THINKING_ON,
+    THINKING_STATES,
+    ModelCapabilities,
+    capabilities_for,
+    model_catalog,
+    resolve_model_id,
+)
+from ..turn import TurnOptions, UnsupportedOptionError, estimate_text
 from .base import Transport
+
+# Explicit, versioned tool types only. "latest" aliases are never sent.
+WEB_SEARCH_TYPES = ("web_search_20260318", "web_search_20250305")
+RESPONSE_INCLUSIONS = ("excluded", "full")
+ALLOWED_CALLERS = ("code_execution_20260120", "direct")
+
+# The Anthropic API default for the newer web search tool: the tool may also be
+# called from code execution, which is what enables dynamic content filtering.
+# allowed_callers=["direct"] is the value that turns filtering off.
+DYNAMIC_FILTERING_CALLER = "code_execution_20260120"
+
+# Earlier tool versions default to direct calls and have no dynamic filtering.
+BASIC_SEARCH_CALLER = "direct"
+
+# 0 means "no limit" in the form. The provider expresses that by omitting the
+# field and rejects max_uses=0, so 0 must never be forwarded.
+UNLIMITED_MAX_USES = 0
+
+# Why llm-anthropic never calls messages.create(), quoted from its execute():
+# "The Anthropic SDK rejects non-streaming requests with large max_tokens
+# values because they may take longer than ten minutes."
+# Shown as the status of the greyed-out stream control and in /api/form. It is
+# deliberately NOT rendered into the code pane: that pane is the request, and a
+# request carries no commentary.
+STREAMING_TRANSPORT_NOTE = (
+    "llm-anthropic always opens client.messages.stream(): the Anthropic API "
+    "rejects non-streaming requests whose max_tokens could run past ten "
+    "minutes. Streaming is therefore fixed by the runtime, not chosen here."
+)
 
 # The client the generated code builds. No key is ever written into it: the
 # SDK reads ANTHROPIC_API_KEY from the environment, and this project does not
@@ -56,11 +100,263 @@ UNKNOWN = Transport(
 )
 
 
+@dataclass(frozen=True)
+class AnthropicOptions(TurnOptions):
+    """Every value the Anthropic chat form can set.
+
+    These defaults are the defaults the form shows. There is intentionally no
+    second copy of them in the template: the UI reads them from the form
+    schema.
+    """
+
+    model: str = DEFAULT_MODEL
+    # None means "the official default for this model", resolved per model.
+    thinking: str | None = None
+    effort: str = DEFAULT_EFFORT
+    web_search: bool = True
+    # None means "whatever tool version llm-anthropic gives this model".
+    web_search_type: str | None = None
+    allowed_callers: str = DYNAMIC_FILTERING_CALLER
+    response_inclusion: str = "excluded"
+    max_uses: int = 1
+    cache_control: bool = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.max_uses < 0:
+            raise ValueError("max_uses must be 0 (unlimited) or a positive integer")
+        if self.thinking is not None and self.thinking not in THINKING_STATES:
+            raise ValueError(f"thinking must be one of {THINKING_STATES}")
+        if self.web_search_type is not None and self.web_search_type not in WEB_SEARCH_TYPES:
+            raise ValueError(f"web_search_type must be one of {WEB_SEARCH_TYPES}")
+        if self.allowed_callers not in ALLOWED_CALLERS:
+            raise ValueError(f"allowed_callers must be one of {ALLOWED_CALLERS}")
+        if self.response_inclusion not in RESPONSE_INCLUSIONS:
+            raise ValueError(f"response_inclusion must be one of {RESPONSE_INCLUSIONS}")
+
+
+def _web_search_class(model):
+    """The plugin's own WebSearch class, never a copy of it."""
+    for tool_class in getattr(model, "supported_server_side_tools", ()):
+        if getattr(tool_class, "name", None) == "web_search":
+            return tool_class
+    raise ValueError(f"{model.model_id} does not support the web search tool")
+
+
+def _build_web_search_tool(
+    model, options: AnthropicOptions, capabilities: ModelCapabilities
+):
+    tool_class = _web_search_class(model)
+    kwargs: dict[str, Any] = {}
+    # Unlimited is expressed by omission; max_uses=0 is not a legal value.
+    if options.max_uses != UNLIMITED_MAX_USES:
+        kwargs["max_uses"] = options.max_uses
+    # response_inclusion is only accepted by web_search_20260318, and only when
+    # the installed plugin can express it at all. When it cannot, the value is
+    # dropped rather than faked, and the form reports the control as dead.
+    if capabilities.response_inclusion:
+        kwargs["response_inclusion"] = options.response_inclusion
+    # llm-anthropic has no allowed_callers parameter at all: it always emits
+    # the bare tool, and the API default caller applies. The only value that
+    # can honestly reach this point is the caller that will really be in
+    # effect for the selected model; anything else would be a second, fake
+    # request, so it is refused.
+    if options.allowed_callers != capabilities.effective_allowed_callers:
+        raise UnsupportedOptionError(
+            "the installed llm-anthropic cannot send allowed_callers, so "
+            "dynamic filtering cannot be turned off from this UI"
+        )
+    return tool_class(**kwargs)
+
+
+def _find_web_search_tool(kwargs: dict) -> dict | None:
+    for tool in kwargs.get("tools", ()):
+        if tool.get("name") == "web_search":
+            return tool
+    return None
+
+
+def dynamic_filtering_state(kwargs: dict) -> str:
+    """Read dynamic filtering off the request, never off the form.
+
+    ``web_search_20260318`` runs from code execution unless told otherwise, so
+    an omitted ``allowed_callers`` means filtering is active. The older tool
+    has no dynamic filtering at all, which is a different answer from "off".
+    """
+    tool = _find_web_search_tool(kwargs)
+    if tool is None:
+        return "off"
+    if tool.get("type") != "web_search_20260318":
+        return "not-supported"
+    callers = tool.get("allowed_callers")
+    if callers is None:
+        # Omitted means the API default, code_execution_20260120, applies.
+        return "active"
+    return "active" if DYNAMIC_FILTERING_CALLER in callers else "disabled"
+
+
+def effective_allowed_callers(kwargs: dict) -> str | None:
+    """The caller the API will really use, read off the request."""
+    tool = _find_web_search_tool(kwargs)
+    if tool is None:
+        return None
+    callers = tool.get("allowed_callers")
+    if callers:
+        return list(callers)[0]
+    return (
+        DYNAMIC_FILTERING_CALLER
+        if tool.get("type") == "web_search_20260318"
+        else BASIC_SEARCH_CALLER
+    )
+
+
+def _verify(
+    options: AnthropicOptions, kwargs: dict, capabilities: ModelCapabilities
+) -> None:
+    """Refuse to stream a request that contradicts the form."""
+    if not options.system.strip() and "system" in kwargs:
+        raise ValueError("system is empty but the request carries a system prompt")
+    if options.system.strip() and kwargs.get("system") != options.system:
+        raise ValueError("the request system prompt does not match the form")
+
+    if kwargs.get("model") != capabilities.api_model_id:
+        raise ValueError("the request model does not match the form")
+    if kwargs.get("max_tokens") != options.max_tokens:
+        raise ValueError("the request max_tokens does not match the form")
+    _verify_thinking(options, kwargs, capabilities)
+    _verify_effort(options, kwargs)
+    _verify_cache(options, kwargs)
+
+    tool = _find_web_search_tool(kwargs)
+    if not options.web_search:
+        if tool is not None:
+            raise ValueError("web_search is off but a web search tool was built")
+        return
+    if tool is None:
+        raise ValueError("web_search is on but no web search tool was built")
+    if tool["type"] != options.web_search_type:
+        raise ValueError(
+            f"{options.model} sends {tool['type']}, not {options.web_search_type}: "
+            "llm-anthropic derives the web search tool version from the model"
+        )
+    if options.max_uses == UNLIMITED_MAX_USES:
+        if "max_uses" in tool:
+            raise ValueError("max_uses=0 means unlimited and must be omitted")
+    elif tool.get("max_uses") != options.max_uses:
+        raise ValueError("the request max_uses does not match the form")
+    if capabilities.response_inclusion:
+        if tool.get("response_inclusion") != options.response_inclusion:
+            raise ValueError("the request response_inclusion does not match the form")
+    if tool.get("allowed_callers") is not None:
+        raise ValueError("llm-anthropic cannot send allowed_callers, but the request has it")
+
+
+def _verify_thinking(
+    options: AnthropicOptions, kwargs: dict, capabilities: ModelCapabilities
+) -> None:
+    """Thinking has to land as the official value the form promised."""
+    thinking = kwargs.get("thinking")
+    if options.thinking == THINKING_OFF:
+        if capabilities.thinking_off_request == "disabled":
+            if thinking != {"type": "disabled"}:
+                raise ValueError("thinking is off but the request does not disable it")
+        elif thinking is not None:
+            raise ValueError(
+                "thinking is off, so the request must carry no thinking field"
+            )
+        return
+    if thinking is None:
+        raise ValueError("thinking is on but the request carries no thinking field")
+    if capabilities.thinking_mode == "adaptive":
+        if thinking.get("type") != "adaptive":
+            raise ValueError(f"thinking is {thinking.get('type')}, not adaptive")
+        return
+    # Extended (manual) thinking: the budget is set by the runtime, not by us,
+    # so the request has to carry exactly the value the plugin hard-codes.
+    if thinking.get("type") != "enabled":
+        raise ValueError(f"thinking is {thinking.get('type')}, not enabled")
+    if thinking.get("budget_tokens") != capabilities.budget_tokens:
+        raise ValueError(
+            "the request budget_tokens is "
+            f"{thinking.get('budget_tokens')}, not {capabilities.budget_tokens}"
+        )
+
+
+def _verify_effort(options: AnthropicOptions, kwargs: dict) -> None:
+    """Effort has to land on the request the way the form promised."""
+    sent_effort = (kwargs.get("output_config") or {}).get("effort")
+    if options.effort == DEFAULT_EFFORT:
+        if sent_effort is not None:
+            raise ValueError("effort=default must leave effort off the request")
+        return
+    if sent_effort != options.effort:
+        raise ValueError(f"the request effort is {sent_effort}, not {options.effort}")
+    if options.thinking == THINKING_OFF and sent_effort in EFFORT_LEVELS_NEEDING_THINKING:
+        raise ValueError(
+            f"effort={sent_effort} is rejected when thinking is disabled"
+        )
+
+
+def _verify_cache(options: AnthropicOptions, kwargs: dict) -> None:
+    """Prompt caching has to land where the form said, or not at all."""
+    blocks = [
+        block
+        for message in kwargs.get("messages", ())
+        for block in message.get("content", ())
+        if isinstance(block, dict)
+    ]
+    marked = [block for block in blocks if "cache_control" in block]
+    if options.cache_control and not marked:
+        raise ValueError("cache_control is on but no content block carries it")
+    if not options.cache_control and marked:
+        raise ValueError("cache_control is off but the request still carries it")
+
+
+def estimate_request_tokens(kwargs: dict) -> int | None:
+    """A labelled estimate of what this request will cost in input tokens.
+
+    Returns ``None`` when the request holds something a character count cannot
+    speak for - an image, an attachment, a block this project does not model -
+    because showing a number derived from nothing would be worse than showing
+    nothing.
+    """
+    total = 0
+    for message in kwargs.get("messages", ()):
+        content = message.get("content")
+        if isinstance(content, str):
+            total += estimate_text(content)
+            continue
+        if not isinstance(content, list):
+            return None
+        for block in content:
+            if not isinstance(block, dict):
+                return None
+            block_type = block.get("type")
+            if block_type == "text":
+                total += estimate_text(block.get("text", ""))
+            elif block_type in ("thinking", "redacted_thinking"):
+                total += estimate_text(
+                    block.get("thinking") or block.get("data") or ""
+                )
+            elif block_type in ("tool_use", "server_tool_use"):
+                total += estimate_text(json.dumps(block.get("input", {})))
+            elif block_type.endswith("_tool_result"):
+                total += estimate_text(json.dumps(block.get("content", "")))
+            else:
+                return None
+    total += estimate_text(kwargs.get("system") or "")
+    total += estimate_text(json.dumps(kwargs.get("tools", [])))
+    return total
+
+
 class AnthropicProvider:
     """Claude through ``llm-anthropic`` and Anthropic's official Python SDK."""
 
     id = "anthropic"
     label = "Anthropic"
+    # Which SDK the rendered code is for. Named rather than assumed, because
+    # the page says it out loud above the pane.
+    sdk = "anthropic-python"
 
     def owns(self, model_id: str) -> bool:
         """Claimed by prefix, and deliberately not as a catch-all.
@@ -94,3 +390,211 @@ class AnthropicProvider:
         nothing for this project to add to it - and adding anything would be
         the second copy of the request this design exists to prevent."""
         return model.build_kwargs(prompt, conversation)
+
+    def unavailable(self, model_id: str, error: Exception) -> Exception:
+        """``llm-anthropic`` registers its models with or without a key, so an
+        id it does not know really is one this tool version cannot send."""
+        return error
+
+    def blocks(self, message: dict) -> list[dict]:
+        """Anthropic's Message already is a list of typed blocks.
+
+        This is the shape the record's vocabulary was taken from, so there is
+        nothing to translate - only the check that a list is what arrived.
+        """
+        content = message.get("content")
+        return list(content) if isinstance(content, list) else []
+
+    # ---- what the model can do -------------------------------------------
+
+    def resolve_model_id(self, model_id: str) -> str:
+        return resolve_model_id(model_id)
+
+    def capabilities_for(self, model_id: str) -> ModelCapabilities:
+        return capabilities_for(model_id)
+
+    def catalog(self) -> dict:
+        return model_catalog()
+
+    # ---- the turn --------------------------------------------------------
+
+    def options_from(self, payload: dict) -> AnthropicOptions:
+        """The chat form, mapped onto this provider's options.
+
+        Unknown or malformed values raise, and the routes turn that into a
+        400, so a bad form never falls back to a different request than the
+        one the page was showing.
+        """
+        defaults = AnthropicOptions()
+        thinking = payload.get("thinking", defaults.thinking)
+        return AnthropicOptions(
+            model=payload.get("model", defaults.model),
+            max_tokens=int(payload.get("max_tokens", defaults.max_tokens)),
+            system=str(payload.get("system", defaults.system) or ""),
+            # None means "the official default for this model"; anything else
+            # is validated against the model's real thinking capability.
+            thinking=str(thinking) if thinking is not None else None,
+            # The form always sends the effort key; an empty value is
+            # "nothing selected" (a greyed-out select after a model switch),
+            # i.e. the default, never a level to validate against the model.
+            effort=str(payload.get("effort") or defaults.effort),
+            web_search=bool(payload.get("web_search", defaults.web_search)),
+            web_search_type=payload.get("web_search_type", defaults.web_search_type),
+            allowed_callers=payload.get("allowed_callers", defaults.allowed_callers),
+            response_inclusion=payload.get(
+                "response_inclusion", defaults.response_inclusion
+            ),
+            max_uses=int(payload.get("max_uses", defaults.max_uses)),
+            cache_control=bool(payload.get("cache_control", defaults.cache_control)),
+        )
+
+    def accept(
+        self, options: AnthropicOptions, capabilities: ModelCapabilities
+    ) -> AnthropicOptions:
+        """These options, resolved - or a refusal saying which one and why.
+
+        Resolution first, then the checks, and in that order for a reason:
+        "use this model's default" arrives as ``None``, and a check run
+        against ``None`` would read it as "thinking is off" and approve a
+        request that disables thinking on a model that is always thinking.
+        """
+        settled = replace(
+            options,
+            thinking=(
+                options.thinking
+                if options.thinking is not None
+                else capabilities.thinking_default
+            ),
+            web_search_type=(
+                options.web_search_type
+                if options.web_search_type is not None
+                else capabilities.web_search_type
+            ),
+            # The default caller is the newer tool's API default; a model whose
+            # tool version is always called directly gets its own fact instead.
+            allowed_callers=(
+                capabilities.effective_allowed_callers
+                if options.allowed_callers == DYNAMIC_FILTERING_CALLER
+                and capabilities.effective_allowed_callers != DYNAMIC_FILTERING_CALLER
+                else options.allowed_callers
+            ),
+        )
+        _check_thinking(settled, capabilities)
+        _check_effort(settled, capabilities)
+        _check_max_tokens(settled, capabilities)
+        _check_web_search(settled, capabilities)
+        return settled
+
+    def plugin_options(
+        self, options: AnthropicOptions, capabilities: ModelCapabilities
+    ) -> dict:
+        built: dict[str, Any] = {
+            "max_tokens": options.max_tokens,
+            "cache": options.cache_control,
+        }
+        # Thinking and effort are separate controls and separate fields.
+        if options.thinking == THINKING_ON:
+            built["thinking"] = True
+        elif capabilities.thinking_off_request == "disabled":
+            # Adaptive models: the only legal way to stop thinking.
+            built["thinking"] = False
+        # "omitted": leave the option off, which is the model's own default.
+        if options.effort != DEFAULT_EFFORT:
+            built["thinking_effort"] = options.effort
+        return built
+
+    def tools(
+        self, model: Any, options: AnthropicOptions, capabilities: ModelCapabilities
+    ) -> list:
+        if not options.web_search:
+            return []
+        return [_build_web_search_tool(model, options, capabilities)]
+
+    def verify(
+        self, options: AnthropicOptions, kwargs: dict, capabilities: ModelCapabilities
+    ) -> None:
+        _verify(options, kwargs, capabilities)
+
+    def request_facts(self, kwargs: dict) -> dict:
+        return {
+            "dynamic_filtering": dynamic_filtering_state(kwargs),
+            "allowed_callers": effective_allowed_callers(kwargs),
+        }
+
+    def estimate_input_tokens(self, kwargs: dict) -> int | None:
+        return estimate_request_tokens(kwargs)
+
+    def usage_from(self, usage: Any, details: dict) -> dict:
+        """The provider's own counts, under the names this app reports.
+
+        llm's ``input``/``output`` are the uncached counts; the cache counters
+        live in the details ``llm-anthropic`` kept. The context the model
+        really saw is all three - counting only the uncached part under-reports
+        the moment the cache starts doing its job.
+        """
+        return {
+            "input": getattr(usage, "input", None),
+            "output": getattr(usage, "output", None),
+            "cache_creation": details.get("cache_creation_input_tokens"),
+            "cache_read": details.get("cache_read_input_tokens"),
+        }
+
+
+def _check_thinking(options: AnthropicOptions, capabilities: ModelCapabilities) -> None:
+    thinking = options.thinking
+    if thinking == THINKING_OFF and not capabilities.can_disable_thinking:
+        raise UnsupportedOptionError(
+            f"thinking cannot be turned off for {options.model}: "
+            "both the API and llm-anthropic reject thinking="
+            "{'type': 'disabled'} on this model"
+        )
+    if thinking == THINKING_ON and not capabilities.supports_thinking:
+        raise UnsupportedOptionError(f"{options.model} has no thinking parameter")
+
+
+def _check_effort(options: AnthropicOptions, capabilities: ModelCapabilities) -> None:
+    effort = options.effort
+    if effort == DEFAULT_EFFORT:
+        return
+    if not capabilities.supports_effort:
+        raise UnsupportedOptionError(f"{options.model} does not support effort")
+    if effort not in capabilities.effort_levels:
+        raise ValueError(
+            f"effort must be one of {capabilities.effort_levels} for {options.model}"
+        )
+    if effort in capabilities.effort_disabled_with(options.thinking):
+        raise ValueError(
+            f"effort={effort} is rejected when thinking is off: Anthropic "
+            "accepts thinking={'type': 'disabled'} only at "
+            + _highest_effort_without_thinking(capabilities)
+            + " or below"
+        )
+
+
+def _highest_effort_without_thinking(capabilities: ModelCapabilities) -> str:
+    allowed = [
+        level
+        for level in capabilities.effort_levels
+        if level not in EFFORT_LEVELS_NEEDING_THINKING
+    ]
+    return allowed[-1] if allowed else "high"
+
+
+def _check_max_tokens(options: AnthropicOptions, capabilities: ModelCapabilities) -> None:
+    ceiling = capabilities.max_output_tokens
+    if ceiling and options.max_tokens > ceiling:
+        raise ValueError(f"max_tokens must be at most {ceiling} for {options.model}")
+    minimum = capabilities.min_max_tokens(options.thinking)
+    if options.max_tokens < minimum:
+        raise ValueError(
+            f"max_tokens must be greater than the thinking budget "
+            f"({capabilities.budget_tokens}) for {options.model}: "
+            "Anthropic requires budget_tokens to be smaller than max_tokens"
+        )
+
+
+def _check_web_search(options: AnthropicOptions, capabilities: ModelCapabilities) -> None:
+    if options.web_search and not capabilities.supports_web_search:
+        raise UnsupportedOptionError(
+            f"{options.model} does not support the web search tool"
+        )

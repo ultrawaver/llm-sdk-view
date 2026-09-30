@@ -38,8 +38,8 @@ def build(openrouter_registry):
         response = conversation.prompt(
             "hello",
             system=settled.system or None,
-            options=PROVIDER.plugin_options(settled),
-            tools=PROVIDER.tools(model, settled),
+            options=PROVIDER.plugin_options(settled, capabilities),
+            tools=PROVIDER.tools(model, settled, capabilities),
             stream=True,
         )
         kwargs = PROVIDER.assemble(
@@ -87,9 +87,11 @@ def test_a_value_no_api_would_take_is_refused_on_the_way_in(fields):
 def test_every_default_is_expressed_by_omission():
     """Absence on the wire means the provider's own default applied - never
     that a value was lost on the way there."""
-    options = OpenRouterOptions(model="openrouter/openai/gpt-5.4")
+    model_id = "openrouter/openai/gpt-5.4"
+    options = OpenRouterOptions(model=model_id)
+    capabilities = PROVIDER.capabilities_for(model_id)
 
-    assert PROVIDER.plugin_options(options) == {"max_tokens": 16384}
+    assert PROVIDER.plugin_options(options, capabilities) == {"max_tokens": 16384}
     assert options.reasoning_effort == OMITTED
     assert options.reasoning_enabled is None
 

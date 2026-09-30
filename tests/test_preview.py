@@ -387,4 +387,4 @@ def test_an_explicit_new_default_caller_on_the_basic_tool_is_resolved(
         model=HAIKU, allowed_callers="code_execution_20260120"
     ).prepare("Hi")
 
-    assert prepared.allowed_callers == "direct"
+    assert prepared.facts["allowed_callers"] == "direct"

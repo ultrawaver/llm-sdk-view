@@ -78,6 +78,14 @@ def _first_of(block: dict, keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def _streamed_text(response: Any) -> str:
+    """What llm accumulated from the stream, or "" if the turn never finished."""
+    try:
+        return response.text_or_raise()
+    except Exception:  # noqa: BLE001 - an unfinished response has no text yet
+        return ""
+
+
 def _citations(blocks: list[dict]) -> list[dict]:
     found: list[dict] = []
     for block in blocks:
@@ -336,20 +344,30 @@ class ResponseView:
         )
 
 
-def build_response_view(response: Any, ttft_ms: int | None = None) -> ResponseView:
+def build_response_view(
+    response: Any, ttft_ms: int | None = None, blocks: list[dict] | None = None
+) -> ResponseView:
     """Read the Answer off the Message the SDK finished with.
 
     ``response_json`` is the accumulated Message, so citations, thinking and
     server tool blocks are still whole; nothing here rebuilds them from text.
+
+    ``blocks`` is the sending provider's own reading of that Message. Without
+    it the Anthropic shape is assumed, which is right for Anthropic and finds
+    no text at all on either OpenRouter path.
     """
     message = getattr(response, "response_json", None) or {}
-    blocks = _as_blocks(message)
+    if blocks is None:
+        blocks = _as_blocks(message)
     return ResponseView(
         response_id=getattr(response, "id", None),
         message_id=message.get("id"),
         model=message.get("model") or getattr(getattr(response, "model", None), "model_id", None),
         content_blocks=blocks,
-        text=_block_text(blocks, ("text",)) or "",
+        # The blocks are the answer; llm's own accumulated text is the fallback
+        # for a Message this reader could not make sense of, so an unfamiliar
+        # shape costs the citations and the thinking but never the reply.
+        text=_block_text(blocks, ("text",)) or _streamed_text(response),
         thinking=_block_text(blocks, THINKING_BLOCKS),
         citations=_citations(blocks),
         server_tool_blocks=_server_tool_blocks(blocks),

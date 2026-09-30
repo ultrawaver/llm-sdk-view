@@ -11,7 +11,9 @@ from starlette.routing import Route
 
 from . import export_md, rates_page, store, token_count
 from .chat import ChatOptions, ChatSession, MissingKeyError, form_schema
+from .providers import provider_for
 from .records import TurnRecord
+from .turn import TurnOptions
 
 STATIC = Path(__file__).parent / "static"
 
@@ -20,32 +22,14 @@ STATIC = Path(__file__).parent / "static"
 SESSIONS: dict[str, ChatSession] = {}
 
 
-def _options_from_payload(payload: dict) -> ChatOptions:
-    """Map the chat form onto ChatOptions.
+def _options_from_payload(payload: dict) -> TurnOptions:
+    """Map the chat form onto the options of whichever provider will send it.
 
-    Unknown or malformed values raise, and the routes turn that into a 400, so
-    a bad form never falls back to a different request than the one shown.
+    The form is the provider's own, so reading it is too. Nothing here knows
+    which fields exist; the model id decides who is asked.
     """
-    defaults = ChatOptions()
-    thinking = payload.get("thinking", defaults.thinking)
-    return ChatOptions(
-        model=payload.get("model", defaults.model),
-        max_tokens=int(payload.get("max_tokens", defaults.max_tokens)),
-        system=str(payload.get("system", defaults.system) or ""),
-        # None means "the official default for this model"; anything else is
-        # validated against the model's real thinking capability.
-        thinking=str(thinking) if thinking is not None else None,
-        # The form always sends the effort key; an empty value is "nothing
-        # selected" (a greyed-out select after a model switch), i.e. the
-        # default, never a level to validate against the model.
-        effort=str(payload.get("effort") or defaults.effort),
-        web_search=bool(payload.get("web_search", defaults.web_search)),
-        web_search_type=payload.get("web_search_type", defaults.web_search_type),
-        allowed_callers=payload.get("allowed_callers", defaults.allowed_callers),
-        response_inclusion=payload.get("response_inclusion", defaults.response_inclusion),
-        max_uses=int(payload.get("max_uses", defaults.max_uses)),
-        cache_control=bool(payload.get("cache_control", defaults.cache_control)),
-    )
+    model_id = payload.get("model") or ChatOptions.model
+    return provider_for(model_id).options_from({**payload, "model": model_id})
 
 
 def _prior_usage(conversation_id: str | None) -> dict | None:
@@ -222,7 +206,7 @@ async def chat(request: Request) -> JSONResponse:
         # an answer must not leave a turn claiming it did.
         return JSONResponse({"error": f"the request failed: {ex}"}, status_code=502)
     record = result.pop("record")
-    return JSONResponse({"sdk": "anthropic-python", **result, **_keep(session, record)})
+    return JSONResponse({"sdk": session.provider.sdk, **result, **_keep(session, record)})
 
 
 async def chat_stream(request: Request) -> StreamingResponse:
@@ -301,7 +285,7 @@ async def preview(request: Request) -> JSONResponse:
     if pending:
         context = replace(context, pending=True)
     body = {
-        "sdk": "anthropic-python",
+        "sdk": session.provider.sdk,
         "context": context.as_dict(),
         "sent": False,
     }
@@ -312,9 +296,10 @@ async def preview(request: Request) -> JSONResponse:
             **body,
             "code": prepared.code,
             "kwargs": prepared.kwargs,
-            "dynamic_filtering": prepared.dynamic_filtering,
-            "allowed_callers": prepared.allowed_callers,
             "transport": prepared.transport.name,
+            # Whatever this provider can say about the request. Naming the
+            # fields here would make the route know one provider's words.
+            **prepared.facts,
         }
     )
 

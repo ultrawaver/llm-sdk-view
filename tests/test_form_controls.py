@@ -264,8 +264,8 @@ def test_dynamic_filtering_is_active_on_the_newer_tool(make_session, capabilitie
     chat = make_session(model=SONNET)
     prepared = chat.prepare("Filter this")
 
-    assert prepared.dynamic_filtering == "active"
-    assert prepared.allowed_callers == "code_execution_20260120"
+    assert prepared.facts["dynamic_filtering"] == "active"
+    assert prepared.facts["allowed_callers"] == "code_execution_20260120"
     # Nothing is sent, so the API default code_execution_20260120 applies.
     assert "allowed_callers" not in _web_search_tool(prepared.kwargs)
 
@@ -273,8 +273,8 @@ def test_dynamic_filtering_is_active_on_the_newer_tool(make_session, capabilitie
 def test_the_older_tool_has_no_dynamic_filtering(make_session):
     prepared = make_session(model=HAIKU).prepare("Filter this")
 
-    assert prepared.dynamic_filtering == "not-supported"
-    assert prepared.allowed_callers == "direct"
+    assert prepared.facts["dynamic_filtering"] == "not-supported"
+    assert prepared.facts["allowed_callers"] == "direct"
 
 
 def test_direct_callers_is_refused_rather_than_silently_ignored(

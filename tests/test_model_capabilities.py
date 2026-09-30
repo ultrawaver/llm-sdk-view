@@ -401,8 +401,8 @@ def test_right_pane_matches_the_request_for_every_model(model_id, make_session, 
 def test_the_code_pane_reports_the_real_caller(model_id, make_session):
     prepared = make_session(model=model_id).prepare("Hi")
 
-    assert prepared.allowed_callers == EXPECTED[model_id]["effective_allowed_callers"]
-    assert prepared.dynamic_filtering == EXPECTED[model_id]["dynamic_filtering"]
+    assert prepared.facts["allowed_callers"] == EXPECTED[model_id]["effective_allowed_callers"]
+    assert prepared.facts["dynamic_filtering"] == EXPECTED[model_id]["dynamic_filtering"]
 
 
 def test_haiku_request_has_no_response_inclusion(make_session):

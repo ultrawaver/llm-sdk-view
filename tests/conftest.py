@@ -382,11 +382,77 @@ OPENROUTER_MODEL_KWARGS = dict(
 )
 
 
+class _Event:
+    """A streamed Responses event, addressed by attribute the way the SDK's is."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+class _Dumps:
+    """A payload that dumps itself, the way an SDK model does."""
+
+    def __init__(self, dumped):
+        self._dumped = dumped
+
+    def model_dump(self, warnings=True):
+        return self._dumped
+
+
+def _responses_reply(text, usage):
+    """What OpenRouter streams on the Responses path.
+
+    ``llm`` reads the answer off ``response.output_text.delta`` and takes the
+    token counts out of the ``response.completed`` payload, so a turn that has
+    to finish needs both events.
+    """
+    completed = {"id": "resp_fake", "model": "openai/gpt-5.4", "output": [], "usage": usage}
+    response = _Dumps(completed)
+    response.output = []
+    deltas = [_Event(type="response.output_text.delta", delta=text)] if text else []
+    return deltas + [_Event(type="response.completed", response=response)]
+
+
+def _chat_reply(text, usage):
+    """What OpenRouter streams on the Chat Completions path.
+
+    A different shape entirely: chunks with ``choices[0].delta.content``, and
+    the usage on a chunk of its own. Handing the Responses events to this path
+    fails on the first attribute, which is the useful outcome - the two
+    transports are genuinely two wire formats and the fake says so.
+    """
+    def chunk(content=None, usage=None, finish_reason=None):
+        delta = _Event(role="assistant", content=content, tool_calls=None)
+        choice = _Event(delta=delta, logprobs=None, finish_reason=finish_reason)
+        return _Event(
+            id="chatcmpl_fake",
+            object="chat.completion.chunk",
+            model="openai/gpt-5.4",
+            created=0,
+            choices=[choice],
+            usage=_Dumps(usage) if usage else None,
+        )
+
+    deltas = [chunk(content=text)] if text else []
+    return deltas + [chunk(finish_reason="stop"), chunk(usage=usage)]
+
+
+# Each transport renders the same scripted turn in its own wire shape, so a
+# test says what came back without having to know which format carried it.
+REPLY_SHAPES = {
+    "responses.create": _responses_reply,
+    "chat.completions.create": _chat_reply,
+}
+
+
 class _FakeOpenAIStream:
-    """An empty stream: these tests are about the request, not the reply."""
+    """The scripted reply, or an empty one for the tests that only send."""
+
+    def __init__(self, events):
+        self.events = events
 
     def __iter__(self):
-        return iter(())
+        return iter(self.events)
 
 
 class _FakeOpenAICalls:
@@ -396,7 +462,20 @@ class _FakeOpenAICalls:
 
     def create(self, **kwargs):
         self.sent.append((self.name, kwargs))
-        return _FakeOpenAIStream()
+        text, usage = self.sent.reply
+        return _FakeOpenAIStream(REPLY_SHAPES[self.name](text, usage))
+
+
+class _SentCalls(list):
+    """The ``(method, kwargs)`` calls made, and the reply the next one gets."""
+
+    def __init__(self):
+        super().__init__()
+        self.reply: tuple = ("", {})
+
+    def answers(self, text="", *, usage=None):
+        """Script one turn of plain text, in whichever shape gets asked for."""
+        self.reply = (text, usage or {})
 
 
 class _FakeOpenAIClient:
@@ -537,11 +616,13 @@ def fake_openrouter(monkeypatch):
 
     Returns the list of ``(method, kwargs)`` the plugin actually called, which
     is what lets a test compare the rendered request against the sent one
-    without either side being derived from the other.
+    without either side being derived from the other. Call ``.answers()`` on it
+    first to script what comes back, for the tests that need a turn to finish
+    rather than only to be sent.
     """
     from llm.default_plugins import openai_models
 
-    sent: list[tuple[str, dict]] = []
+    sent = _SentCalls()
     monkeypatch.setattr(
         openai_models.openai,
         "OpenAI",

@@ -23,12 +23,20 @@ around.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from typing import Any
 
 from .. import openrouter_api
 from ..model_series import OPENROUTER_RULE, newest_per_series, openrouter_series_for
-from ..turn import TurnOptions, UnsupportedOptionError
+from ..turn import (
+    PROVIDER_DEFAULT,
+    UNKNOWN_CAPABILITY,
+    MissingKeyError,
+    TurnOptions,
+    UnsupportedOptionError,
+    estimate_text,
+)
 from .base import Transport
 
 MODEL_PREFIX = "openrouter/"
@@ -231,6 +239,126 @@ def slug_for(model_id: str) -> str:
     return model_id[len(MODEL_PREFIX) :] if model_id.startswith(MODEL_PREFIX) else model_id
 
 
+# How the Responses output names the two parts a record shows. Reasoning text
+# arrives under either key depending on whether a summary was asked for.
+TEXT_PART = "output_text"
+REASONING_PART_KEYS = ("summary", "content")
+
+
+def _blocks_from_output(output: Any) -> list[dict]:
+    """The reply and the reasoning, out of a Responses ``output`` list.
+
+    Tool calls and the opaque ``encrypted_content`` are deliberately not
+    translated: they are the plugin's business for the next request, and a
+    record that showed them as content would be showing the model's private
+    scratch space as part of its answer.
+    """
+    if not isinstance(output, list):
+        return []
+    blocks: list[dict] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "reasoning":
+            text = "".join(_part_texts(item.get(key)) for key in REASONING_PART_KEYS)
+            if text:
+                blocks.append({"type": "thinking", "thinking": text})
+            continue
+        for part in item.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == TEXT_PART:
+                block = {"type": "text", "text": part.get("text") or ""}
+                # OpenRouter returns web search sources as annotations; the
+                # record reads citations, and they are the same fact.
+                if part.get("annotations"):
+                    block["citations"] = list(part["annotations"])
+                blocks.append(block)
+    return blocks
+
+
+def _part_texts(parts: Any) -> str:
+    if not isinstance(parts, list):
+        return ""
+    return "".join(
+        part["text"]
+        for part in parts
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    )
+
+
+# Where the cache read hides on each path. Both are read, because the
+# transport is chosen per request and a turn's counters must not depend on
+# this project having guessed which one it was.
+CACHED_TOKEN_PARENTS = ("input_tokens_details", "prompt_tokens_details")
+
+
+def _cached_tokens(details: dict) -> int | None:
+    """The cached input tokens this turn reused, or None if none was reported.
+
+    Zero is a real answer and is reported as zero: ``llm`` removes zero-valued
+    keys from the details, so a parent that is present with no ``cached_tokens``
+    inside it means the provider reported no cache hits, while a parent that is
+    absent means it reported nothing at all.
+    """
+    for parent in CACHED_TOKEN_PARENTS:
+        nested = details.get(parent)
+        if isinstance(nested, dict):
+            return nested.get("cached_tokens") or 0
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    """A number the form may simply not have set.
+
+    An empty string is a cleared field, which means "omit", not zero - and
+    zero is a value some of these fields reject outright.
+    """
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    """A tri-state checkbox: on, off, or never touched.
+
+    ``None`` leaves the field off the request, which is not the same request
+    as sending ``false``: one takes OpenRouter's default and the other
+    overrides it.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return value.lower() not in ("false", "0", "off", "no")
+    return bool(value)
+
+
+def _estimate_content(content: Any) -> int | None:
+    """One message's content, estimated - or None if it cannot be.
+
+    Both transports carry text as either a bare string or a list of typed
+    parts, and the part names differ between them (``text`` on one,
+    ``input_text`` and ``output_text`` on the other), so both vocabularies
+    are read and anything else stops the count rather than being skipped.
+    """
+    if content is None:
+        return 0
+    if isinstance(content, str):
+        return estimate_text(content)
+    if not isinstance(content, list):
+        return None
+    total = 0
+    for part in content:
+        if isinstance(part, str):
+            total += estimate_text(part)
+            continue
+        if not isinstance(part, dict):
+            return None
+        if part.get("type") in ("text", "input_text", "output_text"):
+            total += estimate_text(part.get("text", ""))
+        else:
+            return None
+    return total
+
+
 def _wire_value(value: Any) -> Any:
     """An option's value as the wire carries it, not as Python spells it.
 
@@ -354,6 +482,23 @@ class OpenRouterCapabilities:
         """Whether the catalogue had an entry for this model at all."""
         return self.data_source == CATALOGUE_SOURCE
 
+    @property
+    def context_window_source(self) -> str:
+        """Where the context figure's ceiling came from, in words."""
+        if not self.described:
+            return "no OpenRouter catalogue entry for this model"
+        return "OpenRouter catalogue context_length"
+
+    @property
+    def limit_status(self) -> str:
+        """How sure this record is of its own context window.
+
+        A catalogue that could not be read leaves the ceiling unknown, and
+        unknown is its own status: reporting it as a provider default would
+        dress a missing number up as a deliberate one.
+        """
+        return PROVIDER_DEFAULT if self.described else UNKNOWN_CAPABILITY
+
     def supports(self, option: str) -> bool:
         """Whether the model accepts the parameter behind a form control."""
         if option in ALWAYS_AVAILABLE:
@@ -456,6 +601,9 @@ class OpenRouterProvider:
 
     id = "openrouter"
     label = "OpenRouter"
+    # OpenRouter is reached through the OpenAI SDK pointed at openrouter.ai,
+    # so that is the library the rendered code imports and the page names.
+    sdk = "openai-python"
 
     def owns(self, model_id: str) -> bool:
         return model_id.startswith(MODEL_PREFIX)
@@ -529,6 +677,30 @@ class OpenRouterProvider:
 
     # ---- the turn --------------------------------------------------------
 
+    def options_from(self, payload: dict) -> OpenRouterOptions:
+        """The chat form, mapped onto this provider's options.
+
+        The tri-state fields are read with a sentinel rather than with
+        ``or``: ``reasoning_enabled=False`` and "the user did not touch
+        reasoning_enabled" are different requests, and ``or`` cannot tell
+        them apart. Likewise an empty string from a cleared number field is
+        absence, not zero.
+        """
+        return OpenRouterOptions(
+            model=payload["model"],
+            max_tokens=int(payload.get("max_tokens", 16384)),
+            system=str(payload.get("system") or ""),
+            chat_completions=bool(payload.get("chat_completions", False)),
+            reasoning_effort=str(payload.get("reasoning_effort") or OMITTED),
+            reasoning_max_tokens=_optional_int(payload.get("reasoning_max_tokens")),
+            reasoning_enabled=_optional_bool(payload.get("reasoning_enabled")),
+            reasoning_summary=str(payload.get("reasoning_summary") or OMITTED),
+            web_search=bool(payload.get("web_search", False)),
+            max_uses=_optional_int(payload.get("max_uses")),
+            search_context_size=payload.get("search_context_size") or None,
+            routing=payload.get("routing") or None,
+        )
+
     def accept(
         self, options: OpenRouterOptions, capabilities: OpenRouterCapabilities
     ) -> OpenRouterOptions:
@@ -581,7 +753,9 @@ class OpenRouterProvider:
             )
         return replace(options)
 
-    def plugin_options(self, options: OpenRouterOptions) -> dict:
+    def plugin_options(
+        self, options: OpenRouterOptions, capabilities: OpenRouterCapabilities
+    ) -> dict:
         """The option dict ``llm`` is given, in the plugin's own names.
 
         Every "default" is expressed by leaving the field out, so the request
@@ -603,7 +777,12 @@ class OpenRouterProvider:
             built[PLUGIN_OPTION_NAMES["routing"]] = dict(options.routing)
         return built
 
-    def tools(self, model: Any, options: OpenRouterOptions) -> list:
+    def tools(
+        self,
+        model: Any,
+        options: OpenRouterOptions,
+        capabilities: OpenRouterCapabilities,
+    ) -> list:
         """The plugin's own WebSearch, never a description of it.
 
         Building the spec by hand here would be the second copy of a request
@@ -620,7 +799,12 @@ class OpenRouterProvider:
             kwargs["search_context_size"] = options.search_context_size
         return [tool_class(**kwargs)]
 
-    def verify(self, options: OpenRouterOptions, kwargs: dict) -> None:
+    def verify(
+        self,
+        options: OpenRouterOptions,
+        kwargs: dict,
+        capabilities: OpenRouterCapabilities | None = None,
+    ) -> None:
         """Refuse to stream a request that contradicts the form.
 
         The two transports name the same settings differently, so this reads
@@ -655,6 +839,37 @@ class OpenRouterProvider:
         ):
             raise ValueError("the request search_context_size does not match the form")
 
+    def unavailable(self, model_id: str, error: Exception) -> Exception:
+        """Missing key or missing model - they look identical from llm.
+
+        ``llm-openrouter`` registers no models at all until it has a key, so
+        an empty registry is the signal: with no key every id is unknown, and
+        with a key an unknown id is genuinely not on offer.
+        """
+        if not available_model_ids():
+            return MissingKeyError(
+                "No key for OpenRouter, so no OpenRouter models are available. "
+                "Set one with 'llm keys set openrouter' or OPENROUTER_KEY."
+            )
+        return error
+
+    def blocks(self, message: dict) -> list[dict]:
+        """Translate whichever of the two shapes finished into record blocks.
+
+        Chat Completions ends with ``content`` as one plain string. Responses
+        ends with an ``output`` list whose message items hold ``output_text``
+        parts, and whose reasoning items hold their text under ``summary`` or
+        ``content``. Neither is the typed-block list the record reads, and the
+        string is the dangerous one: iterating it yields characters, so a
+        reader written for blocks sees a block per letter.
+        """
+        content = message.get("content")
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else []
+        if isinstance(content, list):
+            return list(content)
+        return _blocks_from_output(message.get("output"))
+
     def request_facts(self, kwargs: dict) -> dict:
         """What the pane can say about this request that the form cannot.
 
@@ -672,7 +887,64 @@ class OpenRouterProvider:
             "web_search": tool.get("type") if tool else None,
         }
 
+    def estimate_input_tokens(self, kwargs: dict) -> int | None:
+        """A labelled estimate, walking whichever request shape was built.
+
+        ``None`` when the request holds something a character count cannot
+        speak for - an image, a file, a block this project does not model -
+        because a number derived from nothing is worse than no number.
+        """
+        total = 0
+        for message in kwargs.get("messages", ()):
+            counted = _estimate_content(message.get("content"))
+            if counted is None:
+                return None
+            total += counted
+        for item in kwargs.get("input", ()):
+            if not isinstance(item, dict):
+                return None
+            counted = _estimate_content(item.get("content"))
+            if counted is None:
+                return None
+            total += counted
+        total += estimate_text(kwargs.get("instructions") or "")
+        total += estimate_text(json.dumps(kwargs.get("tools", [])))
+        return total
+
+    def usage_from(self, usage: Any, details: dict) -> dict:
+        """OpenRouter's own counts, under the names this app reports.
+
+        The cache read is nested, and under a different parent on each path:
+        ``input_tokens_details.cached_tokens`` on Responses and
+        ``prompt_tokens_details.cached_tokens`` on Chat Completions. Reading
+        it off the top level - which is where Anthropic's counters sit - finds
+        nothing and reports every turn as a cache miss.
+
+        ``llm`` strips zeros out of the details, so the parent's presence is
+        what separates "nothing was cached" from "nothing was reported". Both
+        are honest answers and they are not the same one: only the first can
+        be shown as a 0% hit rate.
+
+        There is no cache *write* count on either path. OpenRouter prices one
+        for some models but does not report one here, so it stays unknown
+        rather than being inferred from the read.
+        """
+        return {
+            "input": getattr(usage, "input", None),
+            "output": getattr(usage, "output", None),
+            "cache_creation": None,
+            "cache_read": _cached_tokens(details),
+        }
+
     # ---- what the model can do -------------------------------------------
+
+    def resolve_model_id(self, model_id: str) -> str:
+        """``llm`` registers OpenRouter models under the id the form uses.
+
+        Nothing to map: the plugin builds ``openrouter/<slug>`` from the
+        catalogue entry, which is exactly what reaches this project.
+        """
+        return model_id
 
     def catalog(self) -> dict:
         """The OpenRouter models this machine can actually send to.

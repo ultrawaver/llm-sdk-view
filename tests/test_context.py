@@ -13,16 +13,16 @@ reserved output cannot fit, sending is refused instead.
 import pytest
 from starlette.testclient import TestClient
 
-from native_api_chat import chat as chat_module
 from native_api_chat.app import app
 from native_api_chat.chat import (
     ChatOptions,
     ChatSession,
     ContextState,
-    _estimate_text,
     context_state,
-    estimate_request_tokens,
 )
+from native_api_chat.providers import anthropic as anthropic_provider
+from native_api_chat.providers.anthropic import estimate_request_tokens
+from native_api_chat.turn import estimate_text as _estimate_text
 
 HAIKU = "claude-haiku-4-5-20251001"
 SONNET = "claude-sonnet-5"
@@ -237,7 +237,7 @@ def test_a_request_that_cannot_fit_is_refused(make_session, monkeypatch, fake_pr
     """No silent trimming: the turn is refused and says what to do instead."""
     chat = make_session(model=HAIKU)
     monkeypatch.setattr(
-        chat_module, "estimate_request_tokens", lambda kwargs: 199_000
+        anthropic_provider, "estimate_request_tokens", lambda kwargs: 199_000
     )
 
     with pytest.raises(ValueError, match="does not fit"):
@@ -249,7 +249,7 @@ def test_a_request_that_cannot_fit_is_refused(make_session, monkeypatch, fake_pr
 def test_the_refusal_names_the_two_ways_out(make_session, monkeypatch):
     chat = make_session(model=HAIKU)
     monkeypatch.setattr(
-        chat_module, "estimate_request_tokens", lambda kwargs: 199_000
+        anthropic_provider, "estimate_request_tokens", lambda kwargs: 199_000
     )
 
     with pytest.raises(ValueError) as caught:
@@ -263,7 +263,7 @@ def test_the_refusal_names_the_two_ways_out(make_session, monkeypatch):
 def test_lowering_max_tokens_can_make_it_fit(make_session, monkeypatch):
     chat = make_session(model=HAIKU, max_tokens=1000)
     monkeypatch.setattr(
-        chat_module, "estimate_request_tokens", lambda kwargs: 199_000
+        anthropic_provider, "estimate_request_tokens", lambda kwargs: 199_000
     )
 
     assert chat.prepare("A very long conversation").context.fits is True

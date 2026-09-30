@@ -36,6 +36,7 @@ import llm
 
 from . import model_api
 from .model_series import newest_per_series, series_for, series_label, strip_snapshot
+from .turn import FALLBACK_DATA, PROVIDER_DEFAULT
 
 MODELS_JSON = Path(__file__).parent / "models.json"
 
@@ -136,6 +137,15 @@ class ModelCapabilities:
     data_source: str = ""
     verified: str = ""
     thinking_mode_source: str = ""
+
+    @property
+    def limit_status(self) -> str:
+        """How sure this record is of its own context window.
+
+        The record answers rather than the meter, so that nothing outside
+        this module has to know an Anthropic data source by name.
+        """
+        return PROVIDER_DEFAULT if self.data_source == "models-api" else FALLBACK_DATA
 
     def effort_options(self) -> tuple[str, ...]:
         """Effort levels the form offers. There is no "off": that is thinking."""
