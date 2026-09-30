@@ -5,9 +5,18 @@ tested on its own, with nothing else loaded: an id nobody has thought of yet
 has to be grouped correctly, and nothing here may touch the network.
 """
 
+from dataclasses import replace
+
 import pytest
 
-from native_api_chat.model_series import newest_per_series, series_for, series_label
+from native_api_chat.model_series import (
+    OPENROUTER_RULE,
+    Series,
+    newest_per_series,
+    openrouter_series_for,
+    series_for,
+    series_label,
+)
 
 MODERN = {
     "claude-sonnet-5-5": ("sonnet", (5, 5)),
@@ -114,3 +123,67 @@ def test_a_family_that_does_not_exist_yet_still_groups():
     kept = newest_per_series(["claude-nova-2", "claude-nova-2-1", "claude-nova-2-2"])
 
     assert kept == ("claude-nova-2-2",)
+
+
+# --- OpenRouter ids ---------------------------------------------------------
+
+
+def test_an_openrouter_id_reads_vendor_family_and_version():
+    assert openrouter_series_for("openrouter/anthropic/claude-sonnet-5.5") == Series(
+        "anthropic/claude-sonnet", (5, 5)
+    )
+    assert openrouter_series_for("openrouter/openai/gpt-5.4-mini") == Series(
+        "openai/gpt-mini", (5, 4)
+    )
+    assert openrouter_series_for("openrouter/google/gemini-3.8-flash") == Series(
+        "google/gemini-flash", (3, 8)
+    )
+
+
+def test_a_pricing_tier_is_its_own_series():
+    """`:free` is a different offering, not an older version of the paid one,
+    so neither may knock the other out of the list."""
+    paid = openrouter_series_for("openrouter/qwen/qwen3.8-27b")
+    free = openrouter_series_for("openrouter/qwen/qwen3.8-27b:free")
+
+    assert paid.key != free.key
+    assert newest_per_series(
+        ["openrouter/qwen/qwen3.8-27b", "openrouter/qwen/qwen3.8-27b:free"],
+        rule=OPENROUTER_RULE,
+    ) == ("openrouter/qwen/qwen3.8-27b:free", "openrouter/qwen/qwen3.8-27b")
+
+
+def test_openrouter_leads_with_the_publication_date_not_the_version():
+    """The case the rule exists for, measured against the live catalogue:
+    x-ai/grok-4.20 was published 2026-03-31 and x-ai/grok-4.3 a month later,
+    so "4.20" is 4.2.0. Ranking by version tuple offers the older model."""
+    created = {
+        "openrouter/x-ai/grok-4.20": "1774915200",
+        "openrouter/x-ai/grok-4.3": "1777593600",
+    }
+
+    by_version = replace(OPENROUTER_RULE, created_first=False)
+
+    assert newest_per_series(
+        list(created), created_at=created.get, rule=OPENROUTER_RULE
+    ) == ("openrouter/x-ai/grok-4.3",)
+    # Same grouping, version as the leading key: the superseded model wins.
+    assert newest_per_series(
+        list(created), created_at=created.get, rule=by_version
+    ) == ("openrouter/x-ai/grok-4.20",)
+
+
+def test_an_openrouter_snapshot_date_is_not_a_version():
+    assert openrouter_series_for("openrouter/openai/gpt-4.1-mini-2024-07-18") == Series(
+        "openai/gpt-mini", (4, 1)
+    )
+
+
+def test_an_unreadable_openrouter_version_keeps_its_own_key():
+    """Being unable to order something is not grounds for dropping it."""
+    kept = newest_per_series(
+        ["openrouter/openai/gpt-4o", "openrouter/openai/gpt-4o-mini"],
+        rule=OPENROUTER_RULE,
+    )
+
+    assert set(kept) == {"openrouter/openai/gpt-4o", "openrouter/openai/gpt-4o-mini"}
