@@ -449,22 +449,6 @@ def _web_search_type(model) -> str | None:
     return None
 
 
-def plugin_transport(model) -> str:
-    """Which Anthropic SDK method the installed plugin actually calls.
-
-    ``llm-anthropic`` opens ``messages.stream()`` even when LLM asked for a
-    buffered response: the API rejects non-streaming requests whose
-    ``max_tokens`` could run past ten minutes. So the form has no streaming
-    choice to make, and the right pane must render the call that happens.
-    """
-    source = inspect.getsource(type(model).execute)
-    if ".create(" in source:
-        return "create"
-    if ".stream(" in source:
-        return "stream"
-    return "unknown"
-
-
 def plugin_thinking_budget() -> int | None:
     """The budget_tokens value llm-anthropic hard-codes for extended thinking.
 

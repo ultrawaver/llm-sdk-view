@@ -12,6 +12,7 @@ import pytest
 
 from native_api_chat import capabilities
 from native_api_chat.codegen import render_kwargs
+from native_api_chat.providers.anthropic import CREATE, STREAM
 
 llm_anthropic = pytest.importorskip("llm_anthropic")
 from llm_anthropic import WebSearch  # noqa: E402
@@ -30,11 +31,11 @@ def _built_kwargs(model_id: str = "claude-sonnet-5", cache: bool = True) -> dict
 
 
 def test_rendered_code_is_valid_python():
-    ast.parse(render_kwargs(_built_kwargs()))
+    ast.parse(render_kwargs(_built_kwargs(), CREATE))
 
 
 def test_rendered_code_carries_the_request_values():
-    code = render_kwargs(_built_kwargs())
+    code = render_kwargs(_built_kwargs(), CREATE)
 
     assert 'model="claude-sonnet-5"' in code
     assert "max_tokens=1024" in code
@@ -45,7 +46,7 @@ def test_rendered_code_carries_the_request_values():
 def test_cache_control_is_rendered_where_the_plugin_puts_it():
     """Prompt caching lives on a content block, never at the top level."""
     kwargs = _built_kwargs()
-    code = render_kwargs(kwargs)
+    code = render_kwargs(kwargs, CREATE)
 
     assert "cache_control" not in code.split("messages=")[0]
     assert kwargs["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
@@ -53,14 +54,14 @@ def test_cache_control_is_rendered_where_the_plugin_puts_it():
 
 def test_every_top_level_key_is_rendered():
     kwargs = _built_kwargs()
-    code = render_kwargs(kwargs)
+    code = render_kwargs(kwargs, CREATE)
 
     for key in kwargs:
         assert f"{key}=" in code
 
 
 def test_rendered_code_contains_no_secret():
-    code = render_kwargs(_built_kwargs())
+    code = render_kwargs(_built_kwargs(), CREATE)
 
     assert "api_key=" not in code
     assert "ANTHROPIC_API_KEY" not in code
@@ -90,7 +91,7 @@ def test_the_layout_matches_the_official_playground():
         "thinking": {"type": "disabled"},
     }
 
-    assert render_kwargs(kwargs, transport="stream") == (
+    assert render_kwargs(kwargs, STREAM) == (
         "import anthropic\n"
         "\n"
         "client = anthropic.Anthropic()\n"
@@ -119,14 +120,14 @@ def test_the_layout_matches_the_official_playground():
 
 def test_a_value_that_fits_is_never_exploded():
     """The layout is chosen by width, not by type: dicts can stay inline."""
-    code = render_kwargs({"a": {"x": 1}, "b": [1, 2, 3]}, transport="stream")
+    code = render_kwargs({"a": {"x": 1}, "b": [1, 2, 3]}, STREAM)
 
     assert 'a={"x": 1},' in code
     assert "b=[1, 2, 3]," in code
 
 
 def test_booleans_and_numbers_render_as_python_not_json():
-    code = render_kwargs({"a": True, "b": False, "c": None, "d": 1.5, "e": 3})
+    code = render_kwargs({"a": True, "b": False, "c": None, "d": 1.5, "e": 3}, CREATE)
 
     assert "a=True" in code
     assert "b=False" in code

@@ -18,6 +18,7 @@ llm_anthropic = pytest.importorskip("llm_anthropic")
 from llm_anthropic import WebSearch  # noqa: E402
 
 from native_api_chat.codegen import render_kwargs  # noqa: E402
+from native_api_chat.providers.anthropic import STREAM  # noqa: E402
 
 TARGET_MODEL = "claude-sonnet-5"
 
@@ -105,8 +106,17 @@ def test_renderer_reproduces_the_upstream_request():
         ),
         None,
     )
-    code = render_kwargs(upstream)
-    call = ast.parse(code).body[-1].value
+    code = render_kwargs(upstream, STREAM)
+    # Found by name rather than by position: the transport decides whether the
+    # call is an assignment or the head of a `with`, and the header adds a
+    # client construction of its own. This test is about the arguments that
+    # reach the transport, so it looks for exactly that call.
+    call = next(
+        node
+        for node in ast.walk(ast.parse(code))
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == STREAM.call
+    )
     rendered = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
 
     # The rendered call has to evaluate back to exactly what was built.

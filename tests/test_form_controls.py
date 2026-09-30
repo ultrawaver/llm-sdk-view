@@ -77,7 +77,7 @@ def test_form_schema_defaults_match_the_options():
         "max_uses": 1,
         "cache_control": True,
     }
-    assert schema["transport"]["sdk_method"] == "stream"
+    assert schema["transport"]["sdk_method"] == "messages.stream"
     assert schema["web_search_types"] == list(WEB_SEARCH_TYPES)
     assert schema["response_inclusions"] == list(RESPONSE_INCLUSIONS)
     assert schema["allowed_callers"]["options"] == list(ALLOWED_CALLERS)

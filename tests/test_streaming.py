@@ -13,13 +13,14 @@ import pytest
 from starlette.testclient import TestClient
 
 from native_api_chat.app import app
-from native_api_chat.capabilities import capabilities_for, plugin_transport
+from native_api_chat.capabilities import capabilities_for
 from native_api_chat.chat import (
     RUNTIME_FIXED,
     STREAMING_TRANSPORT_NOTE,
     ChatOptions,
     final_message_text,
 )
+from native_api_chat.providers import provider_for
 
 FOUR_MODELS = (
     "claude-fable-5-1",
@@ -39,7 +40,7 @@ def test_every_model_reports_the_same_transport(model_id):
 
     model = llm.get_model(capabilities_for(model_id).llm_id)
 
-    assert plugin_transport(model) == "stream"
+    assert provider_for(model_id).transport(model).name == "messages.stream"
 
 
 @pytest.mark.parametrize("model_id", FOUR_MODELS)
@@ -131,7 +132,7 @@ def test_the_turn_is_recorded_on_the_conversation(make_session):
 def test_the_code_renders_the_streaming_transport(model_id, make_session):
     prepared = make_session(model=model_id).prepare("Hello")
 
-    assert prepared.transport == "stream"
+    assert prepared.transport.name == "messages.stream"
     assert "with client.messages.stream(" in prepared.code
     assert "client.messages.create(" not in prepared.code
     # The reply is read off the stream, as the official Playground shows it -
@@ -181,7 +182,7 @@ def test_the_form_offers_no_stream_choice():
 def test_the_form_reports_the_transport():
     data = TestClient(app).get("/api/form").json()
 
-    assert data["transport"]["sdk_method"] == "stream"
+    assert data["transport"]["sdk_method"] == "messages.stream"
     assert "ten minutes" in data["transport"]["streaming_note"]
 
 
@@ -196,7 +197,7 @@ def test_a_turn_over_http_uses_the_streaming_transport(
 
     assert response.status_code == 200
     assert response.json()["text"] == "Hello world"
-    assert response.json()["transport"] == "stream"
+    assert response.json()["transport"] == "messages.stream"
     assert transports == ["stream"]
 
 

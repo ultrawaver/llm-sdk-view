@@ -41,12 +41,12 @@ from .capabilities import (
     capabilities_for,
     fallback_models,
     model_catalog,
-    plugin_transport,
     profile,
     provenance,
     resolve_model_id,
 )
 from .codegen import render_kwargs
+from .providers import Transport, provider_for
 from .records import TurnRecord, build_response_view
 
 # Explicit, versioned tool types only. "latest" aliases are never sent.
@@ -653,6 +653,11 @@ def form_schema(model_id: str) -> dict:
     defaults = ChatOptions(model=model_id)
     thinking = capabilities.thinking_default
     fallback = profile()
+    # Read once, from the provider, so the transport named in the schema and
+    # the one the streaming control describes cannot be two different facts.
+    transport = provider_for(model_id).transport(
+        llm.get_model(resolve_model_id(model_id)), defaults
+    )
     catalog = model_catalog()
     return {
         "models": catalog["models"],
@@ -691,7 +696,7 @@ def form_schema(model_id: str) -> dict:
             "cache_control": defaults.cache_control,
         },
         "transport": {
-            "sdk_method": plugin_transport(llm.get_model(resolve_model_id(model_id))),
+            "sdk_method": transport.name,
             "streaming_note": STREAMING_TRANSPORT_NOTE,
         },
         "controls": {
@@ -768,7 +773,7 @@ def form_schema(model_id: str) -> dict:
                 "status": RUNTIME_FIXED,
                 "value": "ON",
                 "editable": False,
-                "sdk_method": "client.messages.stream(...)",
+                "sdk_method": f"{transport.call}(...)",
                 "options": [
                     {"value": "ON", "disabled": False},
                     {
@@ -806,7 +811,7 @@ class PreparedTurn:
     code: str
     dynamic_filtering: str
     allowed_callers: str | None
-    transport: str
+    transport: Transport
     context: ContextState
 
 
@@ -839,6 +844,7 @@ class ChatSession:
                 allowed_callers=self.capabilities.effective_allowed_callers,
             )
         self.model = llm.get_model(resolve_model_id(self.options.model))
+        self.provider = provider_for(self.options.model)
         self._check_thinking()
         self._check_effort()
         self._check_max_tokens()
@@ -995,9 +1001,9 @@ class ChatSession:
             options["thinking_effort"] = self.options.effort
         return options
 
-    def _transport(self) -> str:
-        """The SDK method the installed plugin will really call."""
-        return plugin_transport(self.model)
+    def _transport(self) -> Transport:
+        """The SDK call this turn will really make."""
+        return self.provider.transport(self.model, self.options)
 
     def context(self) -> ContextState:
         """The context figure for the state this session is in."""
@@ -1053,7 +1059,9 @@ class ChatSession:
             tools=self._tools(),
             stream=True,
         )
-        kwargs = self.model.build_kwargs(response.prompt, self.conversation)
+        kwargs = self.provider.assemble(
+            self.model, response.prompt, self.conversation, self.options
+        )
         _verify(self.options, kwargs, self.capabilities)
         self._last_kwargs = kwargs
         before = self.measure(kwargs, text)
@@ -1119,7 +1127,7 @@ class ChatSession:
             "kwargs": prepared.kwargs,
             "dynamic_filtering": prepared.dynamic_filtering,
             "allowed_callers": prepared.allowed_callers,
-            "transport": prepared.transport,
+            "transport": prepared.transport.name,
             "context": prepared.context.as_dict(),
         }
         # Time to the first text chunk, measured client-side. llm records

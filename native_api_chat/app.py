@@ -314,7 +314,7 @@ async def preview(request: Request) -> JSONResponse:
             "kwargs": prepared.kwargs,
             "dynamic_filtering": prepared.dynamic_filtering,
             "allowed_callers": prepared.allowed_callers,
-            "transport": prepared.transport,
+            "transport": prepared.transport.name,
         }
     )
 

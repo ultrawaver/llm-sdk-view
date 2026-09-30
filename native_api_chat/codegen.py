@@ -1,25 +1,28 @@
 """Render the provider request as Python source.
 
-There is exactly one input: the dictionary the execution path is about to hand
-to the Anthropic SDK. Nothing in this module is allowed to construct, default
-or "improve" that dictionary - a renderer that invents values would let the
-right pane drift from the request, which is the one thing it exists to prevent.
+There are exactly two inputs: the dictionary the execution path is about to
+hand to the SDK, and the :class:`~native_api_chat.providers.base.Transport`
+describing the call it will be handed to. Nothing in this module is allowed to
+construct, default or "improve" either of them - a renderer that invented
+values would let the right pane drift from the request, which is the one thing
+it exists to prevent.
+
+Whitespace is the only thing this module chooses. Which SDK, which client,
+which method and how the reply is read all belong to the provider, because
+only the provider knows what really happens.
 """
 
+from __future__ import annotations
+
 import json
+
+from .providers.base import Transport
 
 # The official Playground inlines a value when it fits on one line and explodes
 # it when it does not. Its sample inlines an item 58 columns wide and explodes
 # one 104 columns wide, so any threshold between the two reproduces it; 88 is
 # the usual Python line length and sits inside that window.
 LINE_WIDTH = 88
-
-# How the official Playground ends the call: the reply is read off the stream,
-# not handed back as one finished object.
-STREAM_BODY = (
-    "    for text in stream.text_stream:\n"
-    '        print(text, end="", flush=True)\n'
-)
 
 
 def _inline(value) -> str:
@@ -97,35 +100,36 @@ def _argument(key: str, value) -> str:
     return one_line
 
 
-def render_kwargs(kwargs: dict, transport: str = "create") -> str:
-    """Render SDK code from provider parameters.
+def render_kwargs(kwargs: dict, transport: Transport) -> str:
+    """Render SDK code from provider parameters and the call they go to.
 
-    The input must be the dictionary the execution path actually sends, not a
+    ``kwargs`` must be the dictionary the execution path actually sends, not a
     re-derivation of it, so that the right pane cannot drift from the request.
-    Its key order is the order ``llm-anthropic`` assembled the request in and is
+    Its key order is the order the plugin assembled the request in and is
     reproduced as-is; grouping or sorting keys would hide that.
 
-    ``transport`` is the SDK method the plugin really calls - passing "create"
-    for a request that goes out as a stream would be a lie about the call.
+    ``transport`` is the call that really happens. It is required rather than
+    defaulted, because every default here is a guess about someone else's
+    runtime, and a guess is how a pane ends up printing a request nobody sends.
 
     Whitespace is the only thing this renderer chooses: values and their order
     are the provider's, the layout is the official Playground's. Nothing is
-    emitted as commentary - a request carries no explanation, and why streaming
-    is fixed belongs to the form control that is greyed out.
+    emitted as commentary - a request carries no explanation, and why a
+    transport is fixed belongs to the form control that is greyed out.
     """
     arguments = ",\n".join(f"    {_argument(key, value)}" for key, value in kwargs.items())
-    header = "import anthropic\n\nclient = anthropic.Anthropic()\n"
-    if transport == "stream":
+    if transport.context:
         return (
-            f"{header}\n"
-            "with client.messages.stream(\n"
+            f"{transport.header}\n"
+            f"with {transport.call}(\n"
             f"{arguments},\n"
-            ") as stream:\n"
-            f"{STREAM_BODY}"
+            f") as {transport.binding}:\n"
+            f"{transport.body}"
         )
     return (
-        f"{header}\n"
-        "message = client.messages.create(\n"
+        f"{transport.header}\n"
+        f"{transport.binding} = {transport.call}(\n"
         f"{arguments},\n"
         ")\n"
+        f"{transport.body}"
     )
