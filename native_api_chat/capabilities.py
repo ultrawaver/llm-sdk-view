@@ -3,7 +3,7 @@
 1. The Anthropic **Models API** - model list, ``max_input_tokens`` (context
    window), ``max_tokens`` (output ceiling) and the ``thinking`` / ``effort``
    capabilities. Read live when a key exists, otherwise from a disk cache, by
-   :mod:`llm_sdk_view.model_api`. It is never allowed to block the page.
+   :mod:`native_api_chat.model_api`. It is never allowed to block the page.
 2. The **fallback profile** in ``models.json`` - a versioned snapshot of
    Anthropic's published specs, used only for the four current models and only
    when the API is unavailable. It is always labelled as a fallback.

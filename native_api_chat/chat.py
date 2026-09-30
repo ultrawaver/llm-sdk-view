@@ -1,6 +1,6 @@
 """The real conversation path.
 
-    Browser -> llm-sdk-view -> LLM Python API -> llm-anthropic -> Anthropic SDK
+    Browser -> native-api-chat -> LLM Python API -> llm-anthropic -> Anthropic SDK
 
 This module deliberately owns no request-shaping logic of its own. The
 parameters shown in the right pane are the dictionary ``llm_anthropic`` hands to
@@ -9,7 +9,7 @@ thing the plugin calls before sending. There is no second, hand-maintained copy
 of the request anywhere in this project.
 
 The form values below are *requests*, not facts: every one of them is checked
-against the built request, and against :mod:`llm_sdk_view.capabilities`, before
+against the built request, and against :mod:`native_api_chat.capabilities`, before
 a turn is allowed to stream. When the installed plugin cannot express a value
 the form asks for, the turn is refused instead of quietly sending something
 else.

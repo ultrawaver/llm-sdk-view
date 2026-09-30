@@ -240,7 +240,7 @@ def kick(kwargs: dict) -> bool:
             # on its way out, and "almost dead" must not pass for "will pick
             # this up".
             _worker = threading.Thread(
-                target=_drain, name="llm-sdk-view-token-count", daemon=True
+                target=_drain, name="native-api-chat-token-count", daemon=True
             )
             _worker.start()
     return True

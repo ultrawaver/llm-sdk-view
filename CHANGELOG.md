@@ -716,3 +716,29 @@ been sent at `xhigh` thirteen turns running. The user had changed nothing.
   `rates_state` and `rates_error` - so the reason for a missing estimate always
   fell through to the vaguer "no cost estimate" instead of naming the
   unreachable pricing page.
+
+
+### Renamed to Native API Chat
+
+- `llm-sdk-view` described the right-hand pane, not the product. The name is
+  now `native-api-chat`: *native* because the request carries the provider's
+  own API rather than a lowest-common-denominator compatibility layer, *API*
+  because every parameter, request, response and usage figure is visible, and
+  *chat* because this is a conversation you keep, not a one-shot inspector.
+  LLM stays in the description ("built on LLM and llm-anthropic") instead of
+  being pushed into the brand.
+- Everything mechanical moved with it: the package is `native_api_chat`, the
+  plugin command is `llm native-chat`, the standalone script is
+  `native-api-chat`, the disk cache is `~/.cache/native-api-chat/`, and the
+  three environment variables are `NATIVE_API_CHAT_CACHE_DIR`,
+  `NATIVE_API_CHAT_LOGS_DB` and `NATIVE_API_CHAT_REQUIRE_BROWSER`.
+- The sidecar table `llm_sdk_view_turns` becomes `native_api_chat_turns`, and
+  an existing one is carried over by `ALTER TABLE ... RENAME TO` rather than
+  left behind for nothing to read. The rows keep their primary key and their
+  foreign key into `turns`, and their `source` values are **not** rewritten: a
+  turn written by llm-sdk-view was written by llm-sdk-view, and that column
+  exists to say so. `tests/test_conversations.py` pins the carry-over, that
+  the legacy table is gone afterwards, and that reopening the database is a
+  no-op.
+- Entries above this one keep the paths and names the files really had at the
+  time. Rewriting them would make the log claim a history it does not have.

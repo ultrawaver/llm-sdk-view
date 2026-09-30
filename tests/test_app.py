@@ -1,13 +1,13 @@
 from starlette.testclient import TestClient
 
-from llm_sdk_view.app import app
-from llm_sdk_view.chat import ChatOptions, ChatSession
+from native_api_chat.app import app
+from native_api_chat.chat import ChatOptions, ChatSession
 
 
 def test_health():
     response = TestClient(app).get("/health")
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "project": "llm-sdk-view"}
+    assert response.json() == {"ok": True, "project": "native-api-chat"}
 
 
 def test_the_page_can_ask_where_the_rates_came_from():

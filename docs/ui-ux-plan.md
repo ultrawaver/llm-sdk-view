@@ -38,12 +38,12 @@ where this app must deliberately differ from them.
 
 ## 1. What this product is — and what it is not
 
-LLM SDK View is **an inspection and teaching tool with a chat attached**, not a
+Native API Chat is **an inspection and teaching tool with a chat attached**, not a
 chat client with a code view attached.
 
 ```
 ChatGPT / Claude / LibreChat:   chat is the hero, code is an afterthought
-LLM SDK View:                   the request and the response are the hero;
+Native API Chat:                   the request and the response are the hero;
                                 chat is how you produce them
 ```
 
@@ -147,7 +147,7 @@ inspector never):
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ ☰ LLM SDK View   [Model▾][Thinking▾][Effort▾][Max tokens▾][System▾]      │
+│ ☰ Native API Chat   [Model▾][Thinking▾][Effort▾][Max tokens▾][System▾]      │
 │                  [Web Search▾][Caching▾][Streaming 🔒]   ← topbar pills  │
 ├────────────┬──────────────────────────────┬───────────────────────────┤
 │ ☰ Convos   │  Chat                        │  Inspector                │

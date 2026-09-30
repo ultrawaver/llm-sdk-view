@@ -38,8 +38,8 @@ class ModelsApiUnavailable(RuntimeError):
 
 def cache_path() -> Path:
     """Disk cache location. Overridable so tests never touch the real one."""
-    override = os.environ.get("LLM_SDK_VIEW_CACHE_DIR")
-    base = Path(override) if override else Path.home() / ".cache" / "llm-sdk-view"
+    override = os.environ.get("NATIVE_API_CHAT_CACHE_DIR")
+    base = Path(override) if override else Path.home() / ".cache" / "native-api-chat"
     return base / "models-api.json"
 
 
@@ -168,7 +168,7 @@ def kick_refresh() -> bool:
         except Exception:  # noqa: BLE001 - a background refresh must not raise
             pass
 
-    _refresh_thread = threading.Thread(target=run, name="llm-sdk-view-models-api", daemon=True)
+    _refresh_thread = threading.Thread(target=run, name="native-api-chat-models-api", daemon=True)
     _refresh_thread.start()
     return True
 

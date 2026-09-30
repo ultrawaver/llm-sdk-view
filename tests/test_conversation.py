@@ -8,7 +8,7 @@ the machine and no key is needed.
 import llm
 import pytest
 
-from llm_sdk_view.chat import ChatSession, MissingKeyError
+from native_api_chat.chat import ChatSession, MissingKeyError
 
 
 def test_first_turn_reaches_the_left_pane(session):

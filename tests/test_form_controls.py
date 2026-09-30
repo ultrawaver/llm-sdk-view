@@ -11,9 +11,9 @@ import llm
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view.app import app
-from llm_sdk_view.capabilities import capabilities_for, model_ids
-from llm_sdk_view.chat import (
+from native_api_chat.app import app
+from native_api_chat.capabilities import capabilities_for, model_ids
+from native_api_chat.chat import (
     ALLOWED_CALLERS,
     RESPONSE_INCLUSIONS,
     WEB_SEARCH_TYPES,
@@ -434,7 +434,7 @@ def test_form_endpoint_rejects_an_unknown_model():
 def test_chat_endpoint_rejects_an_impossible_request(monkeypatch, fake_provider):
     """A form value the plugin cannot honour is a 400, not a silent change."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
-    from llm_sdk_view.app import SESSIONS
+    from native_api_chat.app import SESSIONS
 
     SESSIONS.clear()
     response = TestClient(app).post(
@@ -449,7 +449,7 @@ def test_chat_endpoint_rejects_an_impossible_request(monkeypatch, fake_provider)
 
 def test_chat_endpoint_applies_web_search_off(monkeypatch, fake_provider):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
-    from llm_sdk_view.app import SESSIONS
+    from native_api_chat.app import SESSIONS
 
     SESSIONS.clear()
     response = TestClient(app).post(
@@ -464,7 +464,7 @@ def test_chat_endpoint_applies_web_search_off(monkeypatch, fake_provider):
 
 def test_chat_endpoint_applies_thinking_off(monkeypatch, fake_provider):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
-    from llm_sdk_view.app import SESSIONS
+    from native_api_chat.app import SESSIONS
 
     SESSIONS.clear()
     response = TestClient(app).post(
@@ -541,7 +541,7 @@ def test_a_request_with_the_wrong_model_is_refused(make_session, monkeypatch):
 
 def test_no_hand_maintained_request_renderer_survives():
     """The renderer must take build_kwargs() output and nothing else."""
-    from llm_sdk_view import codegen
+    from native_api_chat import codegen
 
     assert not hasattr(codegen, "anthropic_kwargs")
     assert not hasattr(codegen, "anthropic_messages")

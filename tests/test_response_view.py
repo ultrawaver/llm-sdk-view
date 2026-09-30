@@ -6,7 +6,7 @@ differ from the real one in exactly the ways these tests look for.
 """
 
 
-from llm_sdk_view.records import (
+from native_api_chat.records import (
     NAME_MAX_CHARS,
     RAW_MESSAGE_KEYS,
     RAW_USAGE_KEYS,
@@ -130,7 +130,7 @@ def test_the_record_ties_one_turn_together(make_session):
     assert record["rendered_code"] == result["code"]
     assert record["user_input"] == "hello"
     assert record["options"]["model"] == SONNET
-    assert record["source"] == "llm-sdk-view"
+    assert record["source"] == "native-api-chat"
 
 
 def test_the_bubble_and_the_pane_are_the_same_message(make_session, response_scenario):

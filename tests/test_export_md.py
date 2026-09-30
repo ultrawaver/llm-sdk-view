@@ -12,14 +12,14 @@ from unittest.mock import PropertyMock, patch
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view import store
-from llm_sdk_view.app import SESSIONS, app
-from llm_sdk_view.export_md import (
+from native_api_chat import store
+from native_api_chat.app import SESSIONS, app
+from native_api_chat.export_md import (
     content_disposition,
     conversation_markdown,
     export_filename,
 )
-from llm_sdk_view.records import ResponseView, TurnRecord
+from native_api_chat.records import ResponseView, TurnRecord
 
 pytestmark = pytest.mark.usefixtures("key")
 

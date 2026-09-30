@@ -10,8 +10,8 @@ or absent rather than shown as live.
 
 from datetime import datetime, timedelta, timezone
 
-from llm_sdk_view import pricing, rates_page
-from llm_sdk_view.pricing import (
+from native_api_chat import pricing, rates_page
+from native_api_chat.pricing import (
     RATES_SOURCE,
     RATES_URL,
     cost_breakdown,

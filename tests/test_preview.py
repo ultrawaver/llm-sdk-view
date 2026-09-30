@@ -9,9 +9,9 @@ sending it.
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view import token_count
-from llm_sdk_view.app import SESSIONS, app
-from llm_sdk_view.app import _prior_usage as prior_usage
+from native_api_chat import token_count
+from native_api_chat.app import SESSIONS, app
+from native_api_chat.app import _prior_usage as prior_usage
 
 SONNET = "claude-sonnet-5"
 HAIKU = "claude-haiku-4-5-20251001"

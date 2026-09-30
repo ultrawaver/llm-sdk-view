@@ -10,8 +10,8 @@ import asyncio
 import pytest
 from starlette.requests import Request
 
-from llm_sdk_view import app as app_module
-from llm_sdk_view.app import asset_version
+from native_api_chat import app as app_module
+from native_api_chat.app import asset_version
 
 
 def _request(name: str | None = None) -> Request:

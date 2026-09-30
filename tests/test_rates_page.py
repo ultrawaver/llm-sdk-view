@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from llm_sdk_view import rates_page
-from llm_sdk_view.pricing import ModelRates
-from llm_sdk_view.rates_page import (
+from native_api_chat import rates_page
+from native_api_chat.pricing import ModelRates
+from native_api_chat.rates_page import (
     RatesParseError,
     RatesUnavailableError,
     fetch_pricing_markdown,

@@ -1,6 +1,6 @@
 """The model capability matrix, checked against both sources.
 
-The matrix in ``llm_sdk_view/models.json`` carries the numbers llm-anthropic
+The matrix in ``native_api_chat/models.json`` carries the numbers llm-anthropic
 does not publish (context window, default effort). Everything else is
 re-derived from the installed plugin at runtime. These tests exist so that a
 drift between the two, or a capability the form claims but the request cannot
@@ -10,8 +10,8 @@ carry, fails here instead of in the UI.
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view.app import app
-from llm_sdk_view.capabilities import (
+from native_api_chat.app import app
+from native_api_chat.capabilities import (
     DEFAULT_EFFORT,
     THINKING_OFF,
     THINKING_ON,
@@ -20,7 +20,7 @@ from llm_sdk_view.capabilities import (
     plugin_thinking_budget,
     profile,
 )
-from llm_sdk_view.chat import ChatOptions, UnsupportedOptionError
+from native_api_chat.chat import ChatOptions, UnsupportedOptionError
 
 FOUR_MODELS = (
     "claude-fable-5-1",
@@ -528,6 +528,6 @@ def test_the_documented_cache_minimum_is_a_capability_flag(model_id, expected):
 
 
 def test_an_unknown_family_reports_none_rather_than_guessing():
-    from llm_sdk_view.capabilities import min_cacheable_tokens_for
+    from native_api_chat.capabilities import min_cacheable_tokens_for
 
     assert min_cacheable_tokens_for("claude-something-new-1") is None

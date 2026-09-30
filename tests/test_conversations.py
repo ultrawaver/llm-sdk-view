@@ -14,8 +14,8 @@ import json
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view import store
-from llm_sdk_view.app import SESSIONS, app
+from native_api_chat import store
+from native_api_chat.app import SESSIONS, app
 
 SONNET = "claude-sonnet-5"
 HAIKU = "claude-haiku-4-5-20251001"
@@ -326,8 +326,43 @@ def test_the_write_is_marked_as_ours_without_new_columns(
     )[0]
     upstream = set(database["turns"].columns_dict)
 
-    assert row["source"] == "llm-sdk-view"
+    assert row["source"] == "native-api-chat"
     assert "source" not in upstream
+
+
+def test_the_sidecar_from_before_the_rename_is_carried_over(isolated_history):
+    """A database written as llm-sdk-view keeps its turns under the new name.
+
+    The rows are this app's own, so the rename moves them rather than leaving
+    them in a table nothing reads. Their ``source`` is not rewritten: that
+    column says who wrote the row, and llm-sdk-view is who wrote these.
+    """
+    path = store.database_path()
+    old = store.connect(path)
+    old[store.SIDECAR_TABLE].drop()
+    old[store.LEGACY_SIDECAR_TABLE].create(
+        {"turn_id": str, "source": str, "user_input": str},
+        pk="turn_id",
+        foreign_keys=(("turn_id", "turns", "id"),),
+    )
+    old["turns"].insert({"id": "t1"}, pk="id", alter=True)
+    old[store.LEGACY_SIDECAR_TABLE].insert(
+        {"turn_id": "t1", "source": "llm-sdk-view", "user_input": "written before"}
+    )
+    old.conn.commit()
+    old.conn.close()
+
+    db = store.connect(path)
+    rows = list(db[store.SIDECAR_TABLE].rows)
+
+    assert not db[store.LEGACY_SIDECAR_TABLE].exists()
+    assert [row["user_input"] for row in rows] == ["written before"]
+    assert rows[0]["source"] == "llm-sdk-view"
+    assert db[store.SIDECAR_TABLE].foreign_keys[0].other_table == "turns"
+
+    # Opening it again must find the new table and do nothing.
+    db.conn.close()
+    assert len(list(store.connect(path)[store.SIDECAR_TABLE].rows)) == 1
 
 
 def test_the_store_never_uses_the_users_own_database(isolated_history):

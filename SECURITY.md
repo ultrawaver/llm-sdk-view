@@ -6,7 +6,7 @@ Please report vulnerabilities privately through GitHub's security advisory featu
 
 ## Sensitive data policy
 
-LLM SDK View must never persist or display provider API keys. Keys belong in LLM's key store, environment variables, or another provider-supported credential mechanism.
+Native API Chat must never persist or display provider API keys. Keys belong in LLM's key store, environment variables, or another provider-supported credential mechanism.
 
 The local server binds to `127.0.0.1` by default. Treat `--host 0.0.0.0` as an explicit trust-boundary change.
 

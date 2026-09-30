@@ -10,8 +10,8 @@ import ast
 import llm
 import pytest
 
-from llm_sdk_view import capabilities
-from llm_sdk_view.codegen import render_kwargs
+from native_api_chat import capabilities
+from native_api_chat.codegen import render_kwargs
 
 llm_anthropic = pytest.importorskip("llm_anthropic")
 from llm_anthropic import WebSearch  # noqa: E402

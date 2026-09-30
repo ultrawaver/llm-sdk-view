@@ -34,5 +34,5 @@ jobs:
       # A browser check that quietly skips is a check that is not running.
       - run: pytest
         env:
-          LLM_SDK_VIEW_REQUIRE_BROWSER: "1"
+          NATIVE_API_CHAT_REQUIRE_BROWSER: "1"
       - run: ruff check .

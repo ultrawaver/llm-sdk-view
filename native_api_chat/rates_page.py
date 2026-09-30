@@ -90,8 +90,8 @@ class RatesParseError(RuntimeError):
 
 def cache_path() -> Path:
     """Disk cache location. Overridable so tests never touch the real one."""
-    override = os.environ.get("LLM_SDK_VIEW_CACHE_DIR")
-    base = Path(override) if override else Path.home() / ".cache" / "llm-sdk-view"
+    override = os.environ.get("NATIVE_API_CHAT_CACHE_DIR")
+    base = Path(override) if override else Path.home() / ".cache" / "native-api-chat"
     return base / "rates.json"
 
 
@@ -159,7 +159,7 @@ def fetch_pricing_markdown(
 ) -> str:
     """The pricing page as markdown, or a reason it could not be read."""
     request = urllib.request.Request(
-        url, headers={"User-Agent": "llm-sdk-view rates"}
+        url, headers={"User-Agent": "native-api-chat rates"}
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -302,7 +302,7 @@ def kick_refresh(force: bool = False) -> bool:
                 pass
 
         _refresh_thread = threading.Thread(
-            target=run, name="llm-sdk-view-rates", daemon=True
+            target=run, name="native-api-chat-rates", daemon=True
         )
         _refresh_thread.start()
         return True

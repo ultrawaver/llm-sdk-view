@@ -21,11 +21,11 @@ import llm_anthropic
 import pytest
 import uvicorn
 
-import llm_sdk_view
-from llm_sdk_view import capabilities as capabilities_module
-from llm_sdk_view import model_api, rates_page
-from llm_sdk_view.app import create_app
-from llm_sdk_view.chat import ChatOptions, ChatSession
+import native_api_chat
+from native_api_chat import capabilities as capabilities_module
+from native_api_chat import model_api, rates_page
+from native_api_chat.app import create_app
+from native_api_chat.chat import ChatOptions, ChatSession
 
 # The rates the pricing page currently publishes, for the models the suite
 # prices. Tests read these instead of the page, because a cost assertion that
@@ -104,7 +104,7 @@ def static_page() -> str:
     protect lives in the page, not in one file. Vendored third-party code
     (static/vendor/) is excluded on purpose.
     """
-    root = Path(llm_sdk_view.__file__).parent / "static"
+    root = Path(native_api_chat.__file__).parent / "static"
     return "\n".join(
         path.read_text("utf-8") for path in sorted(root.iterdir()) if path.is_file()
     )
@@ -119,7 +119,7 @@ def no_token_counting(monkeypatch):
     as they do in the app once the client underneath them is a refusal. A test
     that wants counts replaces the client with a table instead.
     """
-    from llm_sdk_view import token_count
+    from native_api_chat import token_count
 
     def refuse(api_key):
         raise RuntimeError("tests never call the API")
@@ -141,8 +141,8 @@ def isolated_machine(monkeypatch):
     API and on one that called it five minutes ago. Tests that want a key or a
     cache install their own afterwards.
     """
-    directory = tempfile.mkdtemp(prefix="llm-sdk-view-cache-")
-    monkeypatch.setenv("LLM_SDK_VIEW_CACHE_DIR", directory)
+    directory = tempfile.mkdtemp(prefix="native-api-chat-cache-")
+    monkeypatch.setenv("NATIVE_API_CHAT_CACHE_DIR", directory)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     # The Models API layer and the send path both read the key store, which on
@@ -299,8 +299,8 @@ def transports() -> list:
 # with `llm` itself (and so CI starts from nothing every time).
 @pytest.fixture(autouse=True)
 def isolated_history(monkeypatch, tmp_path_factory):
-    root = tempfile.mkdtemp(prefix="llm-sdk-view-logs-")
-    monkeypatch.setenv("LLM_SDK_VIEW_LOGS_DB", os.path.join(root, "logs.db"))
+    root = tempfile.mkdtemp(prefix="native-api-chat-logs-")
+    monkeypatch.setenv("NATIVE_API_CHAT_LOGS_DB", os.path.join(root, "logs.db"))
     _FinalMessage.SCENARIO = None
     try:
         yield root
@@ -404,7 +404,7 @@ def capabilities():
     """The capability matrix entry for a model, read off the installed plugin."""
 
     def read(model_id: str):
-        from llm_sdk_view.capabilities import capabilities_for
+        from native_api_chat.capabilities import capabilities_for
 
         return capabilities_for(model_id)
 
@@ -421,12 +421,12 @@ def capabilities():
 def _no_browser(reason: str):
     """Skip, unless the caller said a skip is not an acceptable answer.
 
-    CI sets ``LLM_SDK_VIEW_REQUIRE_BROWSER``: a check that quietly skips is
+    CI sets ``NATIVE_API_CHAT_REQUIRE_BROWSER``: a check that quietly skips is
     a check that is not running, and a suite that stays green while these
     never execute is precisely how the defect they exist for shipped.
     """
-    if os.environ.get("LLM_SDK_VIEW_REQUIRE_BROWSER"):
-        pytest.fail(f"LLM_SDK_VIEW_REQUIRE_BROWSER is set but {reason}")
+    if os.environ.get("NATIVE_API_CHAT_REQUIRE_BROWSER"):
+        pytest.fail(f"NATIVE_API_CHAT_REQUIRE_BROWSER is set but {reason}")
     pytest.skip(reason)
 
 

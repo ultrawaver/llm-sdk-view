@@ -29,9 +29,15 @@ from sqlite_utils import Database
 from .records import SOURCE, ResponseView, TurnRecord, conversation_name
 
 # A test needs a database of its own; nothing else should ever set this.
-DATABASE_ENV = "LLM_SDK_VIEW_LOGS_DB"
+DATABASE_ENV = "NATIVE_API_CHAT_LOGS_DB"
 
-SIDECAR_TABLE = "llm_sdk_view_turns"
+SIDECAR_TABLE = "native_api_chat_turns"
+
+# What the sidecar was called before this project was renamed. The rows are
+# this app's own, so they are carried over rather than abandoned in a table
+# nothing reads. Their ``source`` values are left alone: a turn written by
+# llm-sdk-view was written by llm-sdk-view, and that column exists to say so.
+LEGACY_SIDECAR_TABLE = "llm_sdk_view_turns"
 
 
 class PersistenceError(RuntimeError):
@@ -73,6 +79,11 @@ def connect(path: Path | None = None) -> Database:
 
 def _ensure_sidecar(db: Database) -> None:
     if db[SIDECAR_TABLE].exists():
+        return
+    if db[LEGACY_SIDECAR_TABLE].exists():
+        # ALTER TABLE ... RENAME TO keeps the rows, the primary key and the
+        # foreign key into `turns`, so the history survives the rename intact.
+        db.execute(f'alter table "{LEGACY_SIDECAR_TABLE}" rename to "{SIDECAR_TABLE}"')
         return
     db[SIDECAR_TABLE].create(
         {

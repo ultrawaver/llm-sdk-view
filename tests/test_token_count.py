@@ -14,7 +14,7 @@ from datetime import timedelta
 
 import pytest
 
-from llm_sdk_view import token_count
+from native_api_chat import token_count
 
 
 def wait_until(predicate, timeout: float = 3.0) -> bool:

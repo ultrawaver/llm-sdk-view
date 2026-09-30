@@ -12,9 +12,9 @@ import ast
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view.app import app
-from llm_sdk_view.capabilities import capabilities_for, plugin_transport
-from llm_sdk_view.chat import (
+from native_api_chat.app import app
+from native_api_chat.capabilities import capabilities_for, plugin_transport
+from native_api_chat.chat import (
     RUNTIME_FIXED,
     STREAMING_TRANSPORT_NOTE,
     ChatOptions,
@@ -189,7 +189,7 @@ def test_a_turn_over_http_uses_the_streaming_transport(
     monkeypatch, fake_provider, transports
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")
-    from llm_sdk_view.app import SESSIONS
+    from native_api_chat.app import SESSIONS
 
     SESSIONS.clear()
     response = TestClient(app).post("/api/chat", json={"text": "Hello"})

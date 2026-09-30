@@ -23,7 +23,7 @@ from typing import Any
 
 from .pricing import cost_breakdown
 
-SOURCE = "llm-sdk-view"
+SOURCE = "native-api-chat"
 
 # Titles come from the first user message, not from a model call.
 NAME_MIN_CHARS = 40

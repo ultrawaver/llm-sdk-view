@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view import capabilities, model_api
-from llm_sdk_view.app import app
+from native_api_chat import capabilities, model_api
+from native_api_chat.app import app
 
 FOUR_MODELS = (
     "claude-fable-5-1",
@@ -103,8 +103,8 @@ API_DATA = [
 @pytest.fixture
 def isolated_cache(monkeypatch):
     """Point the disk cache at a scratch dir and forget any snapshot."""
-    scratch = tempfile.mkdtemp(prefix="llm-sdk-view-cache-")
-    monkeypatch.setenv("LLM_SDK_VIEW_CACHE_DIR", scratch)
+    scratch = tempfile.mkdtemp(prefix="native-api-chat-cache-")
+    monkeypatch.setenv("NATIVE_API_CHAT_CACHE_DIR", scratch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     capabilities.reset_model_data()
     yield Path(scratch)
@@ -222,7 +222,7 @@ def test_a_fallback_is_never_labelled_as_the_api(isolated_cache):
 
 def test_the_context_meter_labels_a_fallback_limit(isolated_cache):
     """The context figure must say that its ceiling came from the profile."""
-    from llm_sdk_view.chat import context_state
+    from native_api_chat.chat import context_state
 
     data = TestClient(app).get("/api/form").json()
 
@@ -234,7 +234,7 @@ def test_the_context_meter_labels_a_fallback_limit(isolated_cache):
 
 
 def test_the_context_meter_labels_a_models_api_limit(isolated_cache, record, with_key):
-    from llm_sdk_view.chat import context_state
+    from native_api_chat.chat import context_state
 
     record()
     model_api.refresh()

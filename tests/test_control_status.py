@@ -18,13 +18,13 @@ Four meanings, one vocabulary:
 
 import pytest
 
-from llm_sdk_view.capabilities import (
+from native_api_chat.capabilities import (
     DEFAULT_EFFORT,
     THINKING_OFF,
     THINKING_ON,
     capabilities_for,
 )
-from llm_sdk_view.chat import (
+from native_api_chat.chat import (
     EDITABLE,
     FALLBACK_DATA,
     PROVIDER_DEFAULT,

@@ -71,14 +71,14 @@ were hiding behind that one. So:
 - Never make paid API calls in tests.
 - Never store, print, serialize, or render API keys.
 - Generate SDK code from the request `model.build_kwargs()` returns, never from a second template.
-- Read model facts from the Anthropic Models API first; fall back to the versioned profile in `llm_sdk_view/models.json` only when it is unavailable, and always say which one is in use.
-- Read unit prices from the pricing page at runtime (`llm_sdk_view/rates_page.py`: background fetch, disk cache under `~/.cache/llm-sdk-view/`, never blocking). Never commit a rate table - a price change upstream must not need a commit here. Label a cached rate as cached, and treat an unfetched page or a model the page does not cover as "no estimate", never as a rate borrowed from a neighbour.
-- Keep model capability decisions in `llm_sdk_view/capabilities.py`, not in UI conditionals.
+- Read model facts from the Anthropic Models API first; fall back to the versioned profile in `native_api_chat/models.json` only when it is unavailable, and always say which one is in use.
+- Read unit prices from the pricing page at runtime (`native_api_chat/rates_page.py`: background fetch, disk cache under `~/.cache/native-api-chat/`, never blocking). Never commit a rate table - a price change upstream must not need a commit here. Label a cached rate as cached, and treat an unfetched page or a model the page does not cover as "no estimate", never as a rate borrowed from a neighbour.
+- Keep model capability decisions in `native_api_chat/capabilities.py`, not in UI conditionals.
 - Keep `thinking` and `effort` separate: they are separate API fields, and no control may express one through the other.
 - Never offer a control the runtime cannot honour. Label it `API supported · runtime fixed`, `Unsupported by selected model` or `Unsupported by current tool version`, and refuse the value rather than sending something else.
 - Never render an SDK call that does not happen: `llm-anthropic` always opens `client.messages.stream()`, so `messages.create()` must not appear.
 - Never trim, summarise or compact the conversation. Refuse to send and tell the user to lower `max_tokens` or start a new conversation.
-- Measure the context figure rather than guessing it, in this order: the API's own `count_tokens` for the request just built (`llm_sdk_view/token_count.py` - free, background, cached, never blocking), then the API's own `usage` from the last turn in the conversation, then a character estimate labelled as one. A character count cannot see the ~2,200 tokens Anthropic adds for the `web_search` stub, and must never be preferred over a number the provider reported.
+- Measure the context figure rather than guessing it, in this order: the API's own `count_tokens` for the request just built (`native_api_chat/token_count.py` - free, background, cached, never blocking), then the API's own `usage` from the last turn in the conversation, then a character estimate labelled as one. A character count cannot see the ~2,200 tokens Anthropic adds for the `web_search` stub, and must never be preferred over a number the provider reported.
 - Do not add agents, RAG, memory, MCP, file upload, or additional providers without a separately accepted objective.
 
 ## Current Anthropic acceptance gates

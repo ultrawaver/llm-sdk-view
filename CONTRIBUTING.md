@@ -20,7 +20,7 @@ just
 
 ## Scope
 
-LLM SDK View is intentionally narrow. The first version has two jobs:
+Native API Chat is intentionally narrow. The first version has two jobs:
 
 1. provide a practical conversation interface;
 2. show equivalent provider SDK code generated from the same canonical request.

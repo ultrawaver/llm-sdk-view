@@ -13,9 +13,9 @@ reserved output cannot fit, sending is refused instead.
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view import chat as chat_module
-from llm_sdk_view.app import app
-from llm_sdk_view.chat import (
+from native_api_chat import chat as chat_module
+from native_api_chat.app import app
+from native_api_chat.chat import (
     ChatOptions,
     ChatSession,
     ContextState,

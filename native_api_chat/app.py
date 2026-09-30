@@ -419,7 +419,7 @@ async def form(request: Request) -> JSONResponse:
 
 
 async def health(request: Request) -> JSONResponse:
-    return JSONResponse({"ok": True, "project": "llm-sdk-view"})
+    return JSONResponse({"ok": True, "project": "native-api-chat"})
 
 
 async def version(request: Request) -> JSONResponse:

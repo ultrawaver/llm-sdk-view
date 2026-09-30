@@ -21,4 +21,4 @@
 
 # Start the local development server
 @serve:
-    uv run --extra test llm sdk-view --reload
+    uv run --extra test llm native-chat --reload

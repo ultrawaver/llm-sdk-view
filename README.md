@@ -1,12 +1,17 @@
-# LLM SDK View
+# Native API Chat
 
-Chat on the left. Equivalent provider SDK code on the right.
+A minimal, customizable and auditable chat interface for provider-native LLM
+APIs. **Claude-first, built on [LLM](https://llm.datasette.io/) and
+[`llm-anthropic`](https://github.com/simonw/llm-anthropic). Independent and
+unofficial.**
 
-LLM SDK View is a local web interface for [LLM](https://llm.datasette.io/) that
-is meant to keep a real conversation beside the provider SDK code that represents
-each turn. The first provider target is Anthropic through
-[`llm-anthropic`](https://github.com/simonw/llm-anthropic), which uses
-Anthropic's official Python SDK.
+Customize every call. Inspect every response. Keep every conversation.
+
+"Native" here means the provider's own API, not a lowest-common-denominator
+compatibility layer: the request carries the provider's real parameters, and
+the right pane shows the actual SDK call the run was about to make. The first
+provider is Anthropic through `llm-anthropic`, which uses Anthropic's official
+Python SDK.
 
 > **Status: first conversation slice.** The chat pane now runs a real
 > multi-turn conversation through `llm.Conversation` and `llm-anthropic`, and
@@ -17,7 +22,7 @@ Anthropic's official Python SDK.
 
 ## What actually runs today
 
-- `llm sdk-view` starts a local ASGI server on `127.0.0.1`.
+- `llm native-chat` starts a local ASGI server on `127.0.0.1`.
 - The left pane sends a message into an `llm.Conversation`; replies stream back
   over `/api/chat/stream` as server-sent events.
 - The right pane has two views of the same turn. **Request** renders the
@@ -123,18 +128,18 @@ pip install -e '.[test]'
 ## Run
 
 ```bash
-llm sdk-view
+llm native-chat
 ```
 
 Then open `http://127.0.0.1:8000`. The server binds to `127.0.0.1` by default
 and warns if told otherwise.
 
-Without activating the environment, use `uv run --extra test llm sdk-view`.
+Without activating the environment, use `uv run --extra test llm native-chat`.
 
 The same application can be started directly as a module:
 
 ```bash
-python -m llm_sdk_view
+python -m native_api_chat
 ```
 
 ## Test
@@ -206,11 +211,11 @@ follow-up steps are in
 ## Repository layout
 
 ```text
-llm_sdk_view/       Python package and LLM plugin
+native_api_chat/       Python package and LLM plugin
   app.py            Local ASGI application
   capabilities.py   Model capability matrix, from three ranked sources
   chat.py           The conversation path and the form schema
-  cli.py            `llm sdk-view` command
+  cli.py            `llm native-chat` command
   codegen.py        Provider SDK code generation from build_kwargs()
   model_api.py      Optional Anthropic Models API layer with a disk cache
   models.json       Versioned fallback capability profile

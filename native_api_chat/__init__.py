@@ -1,8 +1,8 @@
 from llm import hookimpl
 
-from .cli import sdk_view
+from .cli import native_chat
 
 
 @hookimpl
 def register_commands(cli):
-    cli.add_command(sdk_view)
+    cli.add_command(native_chat)

@@ -17,7 +17,7 @@ llm_anthropic = pytest.importorskip("llm_anthropic")
 
 from llm_anthropic import WebSearch  # noqa: E402
 
-from llm_sdk_view.codegen import render_kwargs  # noqa: E402
+from native_api_chat.codegen import render_kwargs  # noqa: E402
 
 TARGET_MODEL = "claude-sonnet-5"
 

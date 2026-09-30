@@ -7,7 +7,7 @@ has to be grouped correctly, and nothing here may touch the network.
 
 import pytest
 
-from llm_sdk_view.model_series import newest_per_series, series_for, series_label
+from native_api_chat.model_series import newest_per_series, series_for, series_label
 
 MODERN = {
     "claude-sonnet-5-5": ("sonnet", (5, 5)),

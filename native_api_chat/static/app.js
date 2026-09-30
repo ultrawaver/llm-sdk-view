@@ -1,4 +1,4 @@
-/* LLM SDK View — page logic.
+/* Native API Chat — page logic.
    One request truth: the right pane renders model.build_kwargs() output and
    nothing else. One record per turn: bubble, Response pane and stored row are
    projections of the same TurnRecord. */

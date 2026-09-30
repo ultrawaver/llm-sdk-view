@@ -16,9 +16,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from starlette.testclient import TestClient
 
-from llm_sdk_view import store
-from llm_sdk_view.app import SESSIONS, app
-from llm_sdk_view.records import ResponseView, TurnRecord
+from native_api_chat import store
+from native_api_chat.app import SESSIONS, app
+from native_api_chat.records import ResponseView, TurnRecord
 
 SONNET = "claude-sonnet-5"
 

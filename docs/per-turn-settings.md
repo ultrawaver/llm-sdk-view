@@ -18,9 +18,9 @@ Every turn already records both halves of the story:
 
 | What | Where it lives |
 |---|---|
-| what the form asked for | `llm_sdk_view_turns.effective_options` = `asdict(ChatOptions)`, 11 fields |
-| what actually went out | `llm_sdk_view_turns.request_kwargs` = `model.build_kwargs()` output |
-| what the pane rendered | `llm_sdk_view_turns.rendered_code` |
+| what the form asked for | `native_api_chat_turns.effective_options` = `asdict(ChatOptions)`, 11 fields |
+| what actually went out | `native_api_chat_turns.request_kwargs` = `model.build_kwargs()` output |
+| what the pane rendered | `native_api_chat_turns.rendered_code` |
 | what answered | `turns.response_json` (model served, stop reason) + `turns.input/output_tokens` |
 
 `/api/conversations/<id>` already returns `options` and `request_kwargs` for
@@ -41,7 +41,7 @@ wrong in this codebase specifically.
 
 **The Request is a faithful projection.** `render_kwargs()` is deliberately
 dumb: it iterates `kwargs.items()` and emits every top-level key as-is, with no
-filtering, no defaults and no reordering (`llm_sdk_view/codegen.py`). `model`,
+filtering, no defaults and no reordering (`native_api_chat/codegen.py`). `model`,
 `max_tokens`, `system`, `tools[].type` (the real web-search version),
 `max_uses`, `thinking` in its actual shape, `output_config.effort`,
 `output_config.response_inclusion`, `extra_body`, `betas` and
@@ -154,7 +154,7 @@ value that was not recorded.
 Had it shipped, it would have been read-only derived data — this much is still
 worth recording, because it is the reason the option stays cheap later:
 
-- One derived reader in `llm_sdk_view/records.py` — a `TurnRecord.settings()`
+- One derived reader in `native_api_chat/records.py` — a `TurnRecord.settings()`
   in the same spirit as `ResponseView.raw` and `ResponseView.cost`: derived on
   read, never stored, so an old row and a new row are read through the same
   code and no schema or migration is needed.

@@ -2,7 +2,7 @@
 
 ## Objective
 
-LLM SDK View is a thin visual layer over LLM and provider plugins.
+Native API Chat is a thin visual layer over LLM and provider plugins.
 
 ```text
 Browser UI
@@ -19,7 +19,7 @@ The form, generated SDK code, and execution path must share one request: the
 dictionary `model.build_kwargs()` returns. Code examples must never be
 maintained as independent templates that can drift from execution, so:
 
-- `llm_sdk_view/codegen.py` renders a `build_kwargs()` result and cannot build
+- `native_api_chat/codegen.py` renders a `build_kwargs()` result and cannot build
   a request of its own;
 - every form value is checked against the request that was actually built, and
   a turn is refused when the two disagree;
@@ -29,7 +29,7 @@ maintained as independent templates that can drift from execution, so:
 ## Model capability matrix
 
 Model facts come from three ranked sources, resolved in
-`llm_sdk_view/capabilities.py`:
+`native_api_chat/capabilities.py`:
 
 1. The **Anthropic Models API** — model list, `max_input_tokens` (context
    window), `max_tokens` (output ceiling), and the thinking/effort
@@ -37,7 +37,7 @@ Model facts come from three ranked sources, resolved in
    nothing lands in the prompt log), cached on disk, refreshed in the
    background so the page never waits for the network.
 
-2. The **fallback profile** `llm_sdk_view/models.json` — a versioned snapshot
+2. The **fallback profile** `native_api_chat/models.json` — a versioned snapshot
    of Anthropic's published specs for the four current models, used only when
    the API is unavailable and always labelled as a fallback.
 3. The **installed llm-anthropic** — what can actually go on the wire: tool
@@ -47,7 +47,7 @@ Model facts come from three ranked sources, resolved in
 ### What reaches the dropdown
 
 The API supplies every model, but the dropdown offers one model per series,
-newest first: `llm_sdk_view/model_series.py` reads the family and version out
+newest first: `native_api_chat/model_series.py` reads the family and version out
 of each id, so when a new member of an existing series arrives it replaces the
 old one on the next read, with nothing hand-maintained here. Two further gates
 decide what is offered: the installed plugin must be able to resolve the id
@@ -107,7 +107,7 @@ surface with tests that drive a real browser
 (`tests/test_topbar_in_a_browser.py`): a hit test inside the element's own
 rectangle, a walk up the ancestor chain for `overflow`, and clicks that have
 to reach a handler. They run as part of `pytest` and skip without a browser;
-CI sets `LLM_SDK_VIEW_REQUIRE_BROWSER=1` so a skip there is a failure.
+CI sets `NATIVE_API_CHAT_REQUIRE_BROWSER=1` so a skip there is a failure.
 
 Two display rules fall out of the honesty rules:
 
@@ -202,7 +202,7 @@ numbers. Three sources, in the order they are trusted:
 
 1. `API count` — `client.messages.count_tokens()`, which Anthropic documents as
    free, against the exact request `prepare()` built
-   (`llm_sdk_view/token_count.py`: background thread, in-memory cache, never
+   (`native_api_chat/token_count.py`: background thread, in-memory cache, never
    blocking, never raising into a request path).
 2. `API usage` — the provider's own counts from the last turn in the
    conversation, which is why reopening a two-turn conversation shows its real
@@ -265,7 +265,7 @@ call evaluates back to exactly that dictionary.
 
 ## One record per turn
 
-Every view of a turn is a projection of one object, `llm_sdk_view/records.py`:
+Every view of a turn is a projection of one object, `native_api_chat/records.py`:
 
 ```text
 ChatOptions          -> what the form asked for
@@ -292,7 +292,7 @@ time it was looked at.
 
 ## History lives in llm's database
 
-`llm_sdk_view/store.py` writes through `llm.logs.LogStore` — llm's own
+`native_api_chat/store.py` writes through `llm.logs.LogStore` — llm's own
 read/write API for its SQLite schema and the same object its CLI builds on.
 There is no second conversation or response table, and no subprocess call to
 the CLI:
@@ -303,7 +303,7 @@ the CLI:
 - resuming passes the stored messages back in as `Conversation.loaded_messages`
   so the original content blocks - not a transcript - become the history;
 
-One narrow sidecar table, `llm_sdk_view_turns`, holds what upstream has no
+One narrow sidecar table, `native_api_chat_turns`, holds what upstream has no
 column for: the request this app built and the code it rendered. Both writes
 happen in one transaction; if the sidecar cannot be written the turn is not
 saved and the page is told so. Provenance rides in that table's own `source`
