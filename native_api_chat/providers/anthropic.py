@@ -23,10 +23,23 @@ from ..capabilities import (
     THINKING_STATES,
     ModelCapabilities,
     capabilities_for,
+    fallback_models,
     model_catalog,
+    profile,
+    provenance,
     resolve_model_id,
 )
-from ..turn import TurnOptions, UnsupportedOptionError, estimate_text
+from ..turn import (
+    EDITABLE,
+    PROVIDER_DEFAULT,
+    RUNTIME_FIXED,
+    UNSUPPORTED_BY_MODEL,
+    UNSUPPORTED_BY_TOOL,
+    TurnOptions,
+    UnsupportedOptionError,
+    estimate_text,
+    option_list,
+)
 from .base import Transport
 
 # Explicit, versioned tool types only. "latest" aliases are never sent.
@@ -349,6 +362,152 @@ def estimate_request_tokens(kwargs: dict) -> int | None:
     return total
 
 
+# --- the form -----------------------------------------------------------
+#
+# One control per API field, each saying whether it may be edited and why
+# not when it may not. These live here rather than beside the shared form
+# skeleton because every one of them is a fact about Anthropic's API or
+# about llm-anthropic, and a form assembled from another provider's
+# vocabulary is how a page ends up offering a control that does nothing.
+
+
+def _thinking_control(capabilities: ModelCapabilities, thinking: str) -> dict:
+    if not capabilities.supports_thinking:
+        return {
+            "status": UNSUPPORTED_BY_MODEL,
+            "value": THINKING_OFF,
+            "options": option_list(THINKING_STATES, disabled=THINKING_STATES),
+            "note": "this model has no thinking parameter",
+        }
+    if not capabilities.thinking_editable:
+        return {
+            "status": RUNTIME_FIXED,
+            "value": THINKING_ON,
+            "options": option_list(THINKING_STATES, disabled=(THINKING_OFF,)),
+            "note": (
+                "this model always thinks, and both the API and llm-anthropic "
+                "reject thinking={'type': 'disabled'}"
+            ),
+        }
+    return {
+        "status": EDITABLE,
+        "value": thinking,
+        "options": option_list(THINKING_STATES, disabled=()),
+        "note": (
+            "ON sends thinking={'type': 'adaptive'}"
+            if capabilities.thinking_mode == "adaptive"
+            else "ON sends thinking={'type': 'enabled'} with the budget below"
+        ),
+    }
+
+
+def _effort_control(capabilities: ModelCapabilities) -> dict:
+    if not capabilities.supports_effort:
+        return {
+            "status": UNSUPPORTED_BY_MODEL,
+            "value": DEFAULT_EFFORT,
+            "options": option_list(capabilities.effort_options(), disabled=()),
+            "levels": [],
+            "note": "this model has no effort parameter",
+        }
+    # Only meaningful where thinking can actually be turned off.
+    blocked = capabilities.effort_disabled_with(THINKING_OFF)
+    options = []
+    for value in capabilities.effort_options():
+        options.append(
+            {
+                "value": value,
+                "disabled": False,
+                "blocked_without_thinking": value in blocked,
+            }
+        )
+    note = "sent as output_config.effort"
+    if blocked:
+        note += "; " + ", ".join(blocked) + " are rejected when thinking is off"
+    return {
+        "status": EDITABLE,
+        "value": DEFAULT_EFFORT,
+        "options": options,
+        "levels": list(capabilities.effort_levels),
+        "note": note,
+    }
+
+
+def _budget_control(capabilities: ModelCapabilities, thinking: str) -> dict:
+    if capabilities.thinking_mode != "extended" or capabilities.budget_tokens is None:
+        return {
+            "status": UNSUPPORTED_BY_MODEL,
+            "value": None,
+            "editable": False,
+            "note": (
+                "only extended thinking uses budget_tokens; this model uses "
+                + capabilities.thinking_mode
+                + " thinking"
+            ),
+        }
+    return {
+        "status": RUNTIME_FIXED,
+        "value": capabilities.budget_tokens,
+        "editable": capabilities.budget_tokens_editable,
+        "note": (
+            "llm-anthropic hard-codes DEFAULT_THINKING_TOKENS and exposes no "
+            "option for it, so the value is fixed by the runtime and is only "
+            "sent while thinking is ON"
+        ),
+        "active": thinking == THINKING_ON,
+    }
+
+
+def _response_inclusion_control(capabilities: ModelCapabilities) -> dict:
+    if not capabilities.web_search_type:
+        return {
+            "status": UNSUPPORTED_BY_MODEL,
+            "note": "this model has no web search tool",
+        }
+    if not capabilities.plugin_response_inclusion:
+        return {
+            "status": RUNTIME_FIXED,
+            "note": "llm-anthropic exposes no response_inclusion parameter",
+        }
+    if capabilities.web_search_type != "web_search_20260318":
+        return {
+            "status": UNSUPPORTED_BY_TOOL,
+            "note": f"{capabilities.web_search_type} has no response_inclusion",
+        }
+    return {"status": EDITABLE, "note": f"sent on {capabilities.web_search_type}"}
+
+
+def _allowed_callers_control(capabilities: ModelCapabilities) -> dict:
+    options = []
+    for value in ALLOWED_CALLERS:
+        if value == capabilities.effective_allowed_callers:
+            options.append(
+                {
+                    "value": value,
+                    "disabled": False,
+                    "note": "API default · runtime fixed",
+                }
+            )
+        else:
+            options.append(
+                {
+                    "value": value,
+                    "disabled": True,
+                    "note": "API supported · not exposed by llm-anthropic",
+                }
+            )
+    return {
+        "status": RUNTIME_FIXED,
+        "value": capabilities.effective_allowed_callers,
+        "editable": capabilities.allowed_callers,
+        "options": options,
+        "note": (
+            "the field is not sent, so the API default applies; llm-anthropic "
+            "has no allowed_callers parameter, so the alternative cannot be "
+            "chosen without changing what the request really contains"
+        ),
+    }
+
 class AnthropicProvider:
     """Claude through ``llm-anthropic`` and Anthropic's official Python SDK."""
 
@@ -521,6 +680,146 @@ class AnthropicProvider:
         self, options: AnthropicOptions, kwargs: dict, capabilities: ModelCapabilities
     ) -> None:
         _verify(options, kwargs, capabilities)
+
+    # ---- the form ---------------------------------------------------------
+
+    default_model = DEFAULT_MODEL
+
+    def form(self, capabilities: ModelCapabilities, transport: Transport) -> dict:
+        """This provider's own half of the chat form.
+
+        The shared half is three controls - a model, a reply ceiling and a
+        system prompt - and everything below is Anthropic's vocabulary:
+        thinking and effort are separate API fields, the web search tool
+        version is derived from the model, and prompt caching is a parameter
+        that only this API has. Assembling it here is what lets the page ask
+        one question and get a form the selected model will actually accept.
+        """
+        defaults = AnthropicOptions(model=capabilities.id)
+        thinking = capabilities.thinking_default
+        fallback = profile()
+        return {
+            "model": {
+                "sends": capabilities.api_model_id,
+                "web_search_type": capabilities.web_search_type,
+            },
+            # Where the numbers on this page came from: the Models API when it
+            # answered, the labelled fallback profile when it did not.
+            "model_data": {
+                **provenance(),
+                "profile_version": fallback["profile_version"],
+                "profile_source": fallback["profile_source"],
+                "fallback_models": list(fallback_models()),
+            },
+            "defaults": {
+                "thinking": thinking,
+                "effort": defaults.effort,
+                "web_search": defaults.web_search,
+                "web_search_type": (
+                    capabilities.web_search_type or defaults.web_search_type
+                ),
+                "allowed_callers": defaults.allowed_callers,
+                "response_inclusion": defaults.response_inclusion,
+                "max_uses": defaults.max_uses,
+                "cache_control": defaults.cache_control,
+            },
+            "transport": {"streaming_note": STREAMING_TRANSPORT_NOTE},
+            "controls": {
+                "max_tokens": {
+                    "min_by_thinking": {
+                        THINKING_ON: capabilities.min_max_tokens(THINKING_ON),
+                        THINKING_OFF: capabilities.min_max_tokens(THINKING_OFF),
+                    }
+                },
+                "thinking": _thinking_control(capabilities, thinking),
+                "budget_tokens": _budget_control(capabilities, thinking),
+                "effort": _effort_control(capabilities),
+                "web_search": {"status": EDITABLE},
+                "web_search_type": {
+                    "status": RUNTIME_FIXED,
+                    "value": capabilities.web_search_type,
+                    "options": option_list(
+                        WEB_SEARCH_TYPES,
+                        disabled=tuple(
+                            value
+                            for value in WEB_SEARCH_TYPES
+                            if value != capabilities.web_search_type
+                        ),
+                    ),
+                    "note": "llm-anthropic derives the tool version from the model",
+                },
+                "allowed_callers": _allowed_callers_control(capabilities),
+                "dynamic_filtering": {
+                    "status": (
+                        UNSUPPORTED_BY_TOOL
+                        if capabilities.dynamic_filtering == "not-supported"
+                        else RUNTIME_FIXED
+                    ),
+                    "value": capabilities.dynamic_filtering,
+                    "note": {
+                        "active": "the API default caller runs dynamic filtering",
+                        "not-supported": (
+                            f"{capabilities.web_search_type} has no dynamic "
+                            "filtering; it is called directly"
+                        ),
+                        "off": "no web search tool is sent",
+                    }[capabilities.dynamic_filtering],
+                },
+                "response_inclusion": _response_inclusion_control(capabilities),
+                "max_uses": {
+                    "status": EDITABLE,
+                    "note": "0 means unlimited and is expressed by omitting the field",
+                },
+                "cache_control": {
+                    "status": EDITABLE,
+                    "ttl": {
+                        "status": PROVIDER_DEFAULT,
+                        "value": "5m",
+                        "editable": False,
+                        "supported": capabilities.cache_ttl,
+                        "note": (
+                            "llm-anthropic hard-codes cache_control="
+                            "{'type': 'ephemeral'} and exposes no TTL option, so "
+                            "the form offers no TTL control"
+                        ),
+                    },
+                },
+                "stream": {
+                    "status": RUNTIME_FIXED,
+                    "value": "ON",
+                    "editable": False,
+                    "sdk_method": f"{transport.call}(...)",
+                    "options": [
+                        {"value": "ON", "disabled": False},
+                        {
+                            "value": "OFF",
+                            "disabled": True,
+                            "note": "API supported · not used by llm-anthropic",
+                        },
+                    ],
+                    "note": STREAMING_TRANSPORT_NOTE,
+                },
+            },
+            # Vocabularies the page needs whole, to label a value it did not
+            # pick itself.
+            "vocabulary": {
+                "web_search_types": list(WEB_SEARCH_TYPES),
+                "response_inclusions": list(RESPONSE_INCLUSIONS),
+                "allowed_callers": {
+                    "options": list(ALLOWED_CALLERS),
+                    "api_default": DYNAMIC_FILTERING_CALLER,
+                    "sent": capabilities.allowed_callers,
+                },
+                "cache_ttl": {
+                    "supported": capabilities.cache_ttl,
+                    "note": (
+                        "llm-anthropic hard-codes cache_control="
+                        "{'type': 'ephemeral'} and exposes no TTL option, so the "
+                        "form offers no TTL control."
+                    ),
+                },
+            },
+        }
 
     def request_facts(self, kwargs: dict) -> dict:
         return {

@@ -275,7 +275,7 @@ def test_the_models_offered_are_the_ones_llm_registered(openrouter_registry):
     openrouter_registry("anthropic/claude-sonnet-5", "openai/gpt-5.4")
     catalog = PROVIDER.catalog()
 
-    assert {entry["id"] for entry in catalog["models"]} == {
+    assert set(catalog["models"]) == {
         "openrouter/anthropic/claude-sonnet-5",
         "openrouter/openai/gpt-5.4",
     }
@@ -288,7 +288,7 @@ def test_a_catalogue_model_that_is_not_registered_is_not_offered(
     openrouter_registry("anthropic/claude-sonnet-5")
     openrouter_catalogue("anthropic/claude-sonnet-5", "vendor/unregistered-1")
 
-    assert [entry["id"] for entry in PROVIDER.catalog()["models"]] == [
+    assert PROVIDER.catalog()["models"] == [
         "openrouter/anthropic/claude-sonnet-5"
     ]
 
@@ -304,12 +304,12 @@ def test_only_the_newest_of_a_series_is_offered_and_the_rest_are_named(
     )
     catalog = PROVIDER.catalog()
 
-    assert [entry["id"] for entry in catalog["models"]] == ["openrouter/openai/gpt-5.4"]
+    assert catalog["models"] == ["openrouter/openai/gpt-5.4"]
     assert catalog["superseded"] == [
         {
             "id": "openrouter/openai/gpt-5.2",
             "series": "family:openai/gpt",
-            "newest": "openrouter/openai/gpt-5.4",
+            "kept_by": "openrouter/openai/gpt-5.4",
         }
     ]
     assert "most recently published" in catalog["rule"]

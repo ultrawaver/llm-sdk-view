@@ -29,23 +29,11 @@ from typing import Any
 
 import llm
 
-from .capabilities import (
-    DEFAULT_EFFORT,
-    DEFAULT_MODEL,
-    THINKING_OFF,
-    THINKING_ON,
-    THINKING_STATES,
-    ModelCapabilities,
-    capabilities_for,
-    fallback_models,
-    profile,
-    provenance,
-)
+from .capabilities import ModelCapabilities
 from .codegen import render_kwargs
-from .providers import Transport, provider_for
+from .providers import PROVIDERS, Transport, provider_for
 from .providers.anthropic import (
     ALLOWED_CALLERS,
-    DYNAMIC_FILTERING_CALLER,
     RESPONSE_INCLUSIONS,
     STREAMING_TRANSPORT_NOTE,
     WEB_SEARCH_TYPES,
@@ -65,7 +53,6 @@ from .turn import (
     TurnOptions,
     UnsupportedOptionError,
     estimate_text,
-    option_list,
 )
 
 # The Anthropic option set, under the name it has had since this project had
@@ -250,207 +237,50 @@ def _anthropic_blocks(message: dict) -> list[dict]:
 # --- the form surface --------------------------------------------------------
 
 
-def _thinking_control(capabilities: ModelCapabilities, thinking: str) -> dict:
-    if not capabilities.supports_thinking:
-        return {
-            "status": UNSUPPORTED_BY_MODEL,
-            "value": THINKING_OFF,
-            "options": option_list(THINKING_STATES, disabled=THINKING_STATES),
-            "note": "this model has no thinking parameter",
-        }
-    if not capabilities.thinking_editable:
-        return {
-            "status": RUNTIME_FIXED,
-            "value": THINKING_ON,
-            "options": option_list(THINKING_STATES, disabled=(THINKING_OFF,)),
-            "note": (
-                "this model always thinks, and both the API and llm-anthropic "
-                "reject thinking={'type': 'disabled'}"
-            ),
-        }
-    return {
-        "status": EDITABLE,
-        "value": thinking,
-        "options": option_list(THINKING_STATES, disabled=()),
-        "note": (
-            "ON sends thinking={'type': 'adaptive'}"
-            if capabilities.thinking_mode == "adaptive"
-            else "ON sends thinking={'type': 'enabled'} with the budget below"
-        ),
-    }
-
-
-def _effort_control(capabilities: ModelCapabilities) -> dict:
-    if not capabilities.supports_effort:
-        return {
-            "status": UNSUPPORTED_BY_MODEL,
-            "value": DEFAULT_EFFORT,
-            "options": option_list(capabilities.effort_options(), disabled=()),
-            "levels": [],
-            "note": "this model has no effort parameter",
-        }
-    # Only meaningful where thinking can actually be turned off.
-    blocked = capabilities.effort_disabled_with(THINKING_OFF)
-    options = []
-    for value in capabilities.effort_options():
-        options.append(
-            {
-                "value": value,
-                "disabled": False,
-                "blocked_without_thinking": value in blocked,
-            }
-        )
-    note = "sent as output_config.effort"
-    if blocked:
-        note += "; " + ", ".join(blocked) + " are rejected when thinking is off"
-    return {
-        "status": EDITABLE,
-        "value": DEFAULT_EFFORT,
-        "options": options,
-        "levels": list(capabilities.effort_levels),
-        "note": note,
-    }
-
-
-def _budget_control(capabilities: ModelCapabilities, thinking: str) -> dict:
-    if capabilities.thinking_mode != "extended" or capabilities.budget_tokens is None:
-        return {
-            "status": UNSUPPORTED_BY_MODEL,
-            "value": None,
-            "editable": False,
-            "note": (
-                "only extended thinking uses budget_tokens; this model uses "
-                + capabilities.thinking_mode
-                + " thinking"
-            ),
-        }
-    return {
-        "status": RUNTIME_FIXED,
-        "value": capabilities.budget_tokens,
-        "editable": capabilities.budget_tokens_editable,
-        "note": (
-            "llm-anthropic hard-codes DEFAULT_THINKING_TOKENS and exposes no "
-            "option for it, so the value is fixed by the runtime and is only "
-            "sent while thinking is ON"
-        ),
-        "active": thinking == THINKING_ON,
-    }
-
-
-def _response_inclusion_control(capabilities: ModelCapabilities) -> dict:
-    if not capabilities.web_search_type:
-        return {
-            "status": UNSUPPORTED_BY_MODEL,
-            "note": "this model has no web search tool",
-        }
-    if not capabilities.plugin_response_inclusion:
-        return {
-            "status": RUNTIME_FIXED,
-            "note": "llm-anthropic exposes no response_inclusion parameter",
-        }
-    if capabilities.web_search_type != "web_search_20260318":
-        return {
-            "status": UNSUPPORTED_BY_TOOL,
-            "note": f"{capabilities.web_search_type} has no response_inclusion",
-        }
-    return {"status": EDITABLE, "note": f"sent on {capabilities.web_search_type}"}
-
-
-def _allowed_callers_control(capabilities: ModelCapabilities) -> dict:
-    options = []
-    for value in ALLOWED_CALLERS:
-        if value == capabilities.effective_allowed_callers:
-            options.append(
-                {
-                    "value": value,
-                    "disabled": False,
-                    "note": "API default · runtime fixed",
-                }
-            )
-        else:
-            options.append(
-                {
-                    "value": value,
-                    "disabled": True,
-                    "note": "API supported · not exposed by llm-anthropic",
-                }
-            )
-    return {
-        "status": RUNTIME_FIXED,
-        "value": capabilities.effective_allowed_callers,
-        "editable": capabilities.allowed_callers,
-        "options": options,
-        "note": (
-            "the field is not sent, so the API default applies; llm-anthropic "
-            "has no allowed_callers parameter, so the alternative cannot be "
-            "chosen without changing what the request really contains"
-        ),
-    }
-
-
 def form_schema(model_id: str) -> dict:
-    """Everything the chat form needs: defaults, limits, capabilities, status."""
+    """Everything the chat form needs: defaults, limits, capabilities, status.
+
+    Only the skeleton is here. Three controls are genuinely shared - a model,
+    a reply ceiling and a system prompt - and the rest of the form is the
+    provider's own vocabulary, assembled by the provider. A form built from a
+    union of both providers' fields would offer the selected model controls it
+    has never heard of, which is the one thing a form must not do.
+    """
     provider = provider_for(model_id)
-    capabilities = capabilities_for(model_id)
-    defaults = ChatOptions(model=model_id)
-    thinking = capabilities.thinking_default
-    fallback = profile()
+    capabilities = provider.capabilities_for(model_id)
+    defaults = provider.options_from({"model": model_id})
     # Read once, from the provider, so the transport named in the schema and
     # the one the streaming control describes cannot be two different facts.
     transport = provider.transport(
         llm.get_model(provider.resolve_model_id(model_id)), defaults
     )
     catalog = provider.catalog()
-    return {
+    schema = {
+        "provider": provider_choices(provider),
         "models": catalog["models"],
         # What the narrowing left out. Hidden models are still listed here so
         # the page can say so: a short list that silently dropped nine models
         # would read like lost data rather than like a rule.
         "superseded": catalog["superseded"],
         "series_rule": catalog["rule"],
-        "default_model": DEFAULT_MODEL,
-        # Where the numbers on this page came from: the Models API when it
-        # answered, the labelled fallback profile when it did not.
-        "model_data": {
-            **provenance(),
-            "profile_version": fallback["profile_version"],
-            "profile_source": fallback["profile_source"],
-            "fallback_models": list(fallback_models()),
-        },
+        "default_model": provider.default_model,
         "model": {
             "id": capabilities.id,
-            "sends": capabilities.api_model_id,
             "max_tokens": capabilities.max_output_tokens,
             "context_window": capabilities.context_window,
-            "web_search_type": capabilities.web_search_type,
         },
         "defaults": {
             "model": model_id,
             "max_tokens": defaults.max_tokens,
             "system": defaults.system,
-            "thinking": thinking,
-            "effort": defaults.effort,
-            "web_search": defaults.web_search,
-            "web_search_type": capabilities.web_search_type or defaults.web_search_type,
-            "allowed_callers": defaults.allowed_callers,
-            "response_inclusion": defaults.response_inclusion,
-            "max_uses": defaults.max_uses,
-            "cache_control": defaults.cache_control,
         },
-        "transport": {
-            "sdk_method": transport.name,
-            "streaming_note": STREAMING_TRANSPORT_NOTE,
-        },
+        "transport": {"sdk_method": transport.name},
         "controls": {
             "model": {"status": EDITABLE},
             "max_tokens": {
                 "status": EDITABLE,
                 "min": 1,
                 "max": capabilities.max_output_tokens,
-                "min_by_thinking": {
-                    THINKING_ON: capabilities.min_max_tokens(THINKING_ON),
-                    THINKING_OFF: capabilities.min_max_tokens(THINKING_OFF),
-                },
                 "note": (
                     f"at most {capabilities.max_output_tokens} for {capabilities.id}"
                     if capabilities.max_output_tokens
@@ -458,91 +288,75 @@ def form_schema(model_id: str) -> dict:
                 ),
             },
             "system": {"status": EDITABLE, "note": "omitted from the request when empty"},
-            "thinking": _thinking_control(capabilities, thinking),
-            "budget_tokens": _budget_control(capabilities, thinking),
-            "effort": _effort_control(capabilities),
-            "web_search": {"status": EDITABLE},
-            "web_search_type": {
-                "status": RUNTIME_FIXED,
-                "value": capabilities.web_search_type,
-                "options": option_list(
-                    WEB_SEARCH_TYPES,
-                    disabled=tuple(
-                        value
-                        for value in WEB_SEARCH_TYPES
-                        if value != capabilities.web_search_type
-                    ),
-                ),
-                "note": "llm-anthropic derives the tool version from the model",
-            },
-            "allowed_callers": _allowed_callers_control(capabilities),
-            "dynamic_filtering": {
-                "status": (
-                    UNSUPPORTED_BY_TOOL
-                    if capabilities.dynamic_filtering == "not-supported"
-                    else RUNTIME_FIXED
-                ),
-                "value": capabilities.dynamic_filtering,
-                "note": {
-                    "active": "the API default caller runs dynamic filtering",
-                    "not-supported": (
-                        f"{capabilities.web_search_type} has no dynamic "
-                        "filtering; it is called directly"
-                    ),
-                    "off": "no web search tool is sent",
-                }[capabilities.dynamic_filtering],
-            },
-            "response_inclusion": _response_inclusion_control(capabilities),
-            "max_uses": {
-                "status": EDITABLE,
-                "note": "0 means unlimited and is expressed by omitting the field",
-            },
-            "cache_control": {
-                "status": EDITABLE,
-                "ttl": {
-                    "status": PROVIDER_DEFAULT,
-                    "value": "5m",
-                    "editable": False,
-                    "supported": capabilities.cache_ttl,
-                    "note": (
-                        "llm-anthropic hard-codes cache_control="
-                        "{'type': 'ephemeral'} and exposes no TTL option, so the "
-                        "form offers no TTL control"
-                    ),
-                },
-            },
-            "stream": {
-                "status": RUNTIME_FIXED,
-                "value": "ON",
-                "editable": False,
-                "sdk_method": f"{transport.call}(...)",
-                "options": [
-                    {"value": "ON", "disabled": False},
-                    {
-                        "value": "OFF",
-                        "disabled": True,
-                        "note": "API supported · not used by llm-anthropic",
-                    },
-                ],
-                "note": STREAMING_TRANSPORT_NOTE,
-            },
         },
         "context": context_state({}, capabilities).as_dict(),
         "capabilities": capabilities.as_dict(),
-        "web_search_types": list(WEB_SEARCH_TYPES),
-        "response_inclusions": list(RESPONSE_INCLUSIONS),
-        "allowed_callers": {
-            "options": list(ALLOWED_CALLERS),
-            "api_default": DYNAMIC_FILTERING_CALLER,
-            "sent": capabilities.allowed_callers,
-        },
-        "cache_ttl": {
-            "supported": capabilities.cache_ttl,
-            "note": (
-                "llm-anthropic hard-codes cache_control={'type': 'ephemeral'} and "
-                "exposes no TTL option, so the form offers no TTL control."
-            ),
-        },
+    }
+    return _merge_form(schema, provider.form(capabilities, transport))
+
+
+#: Sections of the schema a provider adds to rather than replaces. The shared
+#: skeleton put something in each of them, and a provider that returned a whole
+#: section would silently drop the three controls every form has.
+MERGED_SECTIONS = ("model", "defaults", "transport", "controls")
+
+
+def _merge_form(schema: dict, own: dict) -> dict:
+    """Fold a provider's own form into the shared skeleton.
+
+    ``controls`` is merged one control at a time, so a provider may add its
+    own fields to a shared control - Anthropic's reply ceiling has a minimum
+    that depends on thinking - without restating the parts it did not change.
+    """
+    for section in MERGED_SECTIONS:
+        for key, value in (own.get(section) or {}).items():
+            if section == "controls" and key in schema[section]:
+                schema[section][key] = {**schema[section][key], **value}
+            else:
+                schema[section][key] = value
+    schema["model_data"] = own.get("model_data") or {}
+    schema.update(own.get("vocabulary") or {})
+    return schema
+
+
+def provider_choices(selected: Any) -> dict:
+    """Who this form belongs to, and who else the user could switch to.
+
+    A provider with nothing to offer says so instead of being hidden: an
+    empty model list looks like a broken page, while "no key configured" is
+    something the user can act on. Availability is asked of the provider
+    rather than assumed from a key name, because what makes a provider usable
+    is its own business - llm-openrouter has no models at all without a key,
+    llm-anthropic registers its own either way.
+    """
+    return {
+        "id": selected.id,
+        "label": selected.label,
+        "sdk": selected.sdk,
+        "options": [_provider_choice(provider) for provider in PROVIDERS],
+    }
+
+
+def _provider_choice(provider: Any) -> dict:
+    """One entry in the switcher, with the model a switch to it would land on.
+
+    The catalogue is read once and the default taken from what it returned,
+    rather than asked for separately: a provider whose list is live would
+    otherwise build it twice per page load to answer two questions about it.
+    """
+    models = provider.catalog()["models"]
+    return {
+        "id": provider.id,
+        "label": provider.label,
+        "models": len(models),
+        "available": bool(models),
+        # The provider's own answer, not the head of the list: two readings of
+        # "the default model" in one response is two things that can disagree,
+        # and this response already carries the other one.
+        "default_model": provider.default_model,
+        "unavailable_note": (
+            "" if models else f"no models are available from {provider.label}"
+        ),
     }
 
 

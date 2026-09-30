@@ -27,7 +27,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .. import openrouter_api
+from .. import openrouter_api, turn
 from ..model_series import OPENROUTER_RULE, newest_per_series, openrouter_series_for
 from ..turn import (
     PROVIDER_DEFAULT,
@@ -36,6 +36,7 @@ from ..turn import (
     TurnOptions,
     UnsupportedOptionError,
     estimate_text,
+    option_list,
 )
 from .base import Transport
 
@@ -128,6 +129,20 @@ PARAMETER_ALIASES = {
     "json_object": "response_format",
 }
 
+# How OpenRouter's hosted web search names itself in a built request. The
+# prefix is what separates it from a function tool, which is named instead.
+WEB_SEARCH_TYPE = "openrouter:web_search"
+
+# Why llm-openrouter never makes the non-streaming call. Both of its models
+# subclass llm's OpenAI handlers, which open a stream whenever `stream=True`,
+# and this project always asks for one - the chunks are the only honest thing
+# to show while a reply is arriving. Shown as the status of the greyed-out
+# stream control, and deliberately not rendered into the code pane.
+STREAMING_NOTE = (
+    "llm-openrouter streams: this project asks for stream=True, so the call "
+    "rendered is the one that happens. Streaming is fixed here, not chosen."
+)
+
 # Options that are OpenRouter's own routing surface rather than a per-model
 # parameter: the catalogue never lists them, and every model accepts them.
 ALWAYS_AVAILABLE = frozenset({"provider", "chat_completions", "image_detail", "max_tokens"})
@@ -145,6 +160,19 @@ NOT_SENT_BY_PLUGIN = "not-sent-by-plugin"
 # every control is unsupported by the model, which is a different fact and a
 # false one.
 UNKNOWN_TO_CATALOGUE = "unknown-to-catalogue"
+
+# The four states, in the words the page greys a control out with. They are
+# shared with Anthropic deliberately: a control that is refused has to say why
+# in the same words on both sides, or the page teaches two dialects of one
+# idea. The codes above stay internal, where the distinctions are decided.
+STATUS_WORDS = {
+    EDITABLE: turn.EDITABLE,
+    UNSUPPORTED_BY_MODEL: turn.UNSUPPORTED_BY_MODEL,
+    # "The plugin will not send this" is exactly what the shared vocabulary
+    # calls unsupported by the current tool version.
+    NOT_SENT_BY_PLUGIN: turn.UNSUPPORTED_BY_TOOL,
+    UNKNOWN_TO_CATALOGUE: turn.UNKNOWN_CAPABILITY,
+}
 
 
 # OpenRouter's reasoning surface is four separate fields, and they are kept
@@ -897,6 +925,182 @@ class OpenRouterProvider:
             return list(content)
         return _blocks_from_output(message.get("output"))
 
+    # ---- the form ---------------------------------------------------------
+
+    @property
+    def default_model(self) -> str | None:
+        """The model a switch to OpenRouter lands on: its newest standard one.
+
+        There is no constant to use here, and committing one would be wrong
+        rather than merely arbitrary: the catalogue is live, so an id pinned in
+        this repo would eventually name a model OpenRouter no longer offers,
+        and a release here cannot be what fixes that.
+
+        "Newest by publication date" is a fact the catalogue already reports,
+        which is why it is the rule rather than a recommendation - this project
+        has no business ranking 356 models by merit. The pricing tiers are
+        excluded: ``:batch`` is an asynchronous endpoint and ``:free`` is rate
+        limited by whoever else is using it, so neither is what "just open
+        OpenRouter" should mean, though both stay selectable.
+
+        None when there are no models - a keyless machine - which the switcher
+        reports rather than presenting an empty list as a broken page.
+        """
+        models = self.catalog()["models"]
+        standard = [model_id for model_id in models if ":" not in slug_for(model_id)]
+        facts = _facts_by_id()
+        ranked = sorted(
+            standard or models,
+            key=lambda model_id: (facts.created_at(model_id) or 0, model_id),
+            reverse=True,
+        )
+        return ranked[0] if ranked else None
+
+    def form(
+        self, capabilities: OpenRouterCapabilities, transport: Transport
+    ) -> dict:
+        """This provider's own half of the chat form.
+
+        Every control below is settled the same way: ask the catalogue whether
+        this model takes the parameter, ask the plugin whether it would send it
+        on this transport, and report whichever of the four answers came back.
+        None of it is decided by what looks reasonable - ``chat_completions``
+        silently drops the reasoning summary and raises on server tools, and
+        both were measured rather than read.
+
+        ``reasoning`` is four controls because it is four API fields. One
+        slider writing to whichever seemed to fit would be inventing a
+        parameter OpenRouter does not have.
+        """
+        defaults = OpenRouterOptions(model=capabilities.id)
+        return {
+            "model": {
+                "sends": capabilities.slug,
+                "name": capabilities.name,
+                "input_modalities": sorted(capabilities.input_modalities),
+            },
+            "model_data": capabilities.provenance,
+            "defaults": {
+                "chat_completions": defaults.chat_completions,
+                "reasoning_effort": defaults.reasoning_effort,
+                "reasoning_max_tokens": defaults.reasoning_max_tokens,
+                "reasoning_enabled": defaults.reasoning_enabled,
+                "reasoning_summary": defaults.reasoning_summary,
+                "web_search": defaults.web_search,
+                "max_uses": defaults.max_uses,
+                "search_context_size": defaults.search_context_size,
+                "routing": defaults.routing,
+            },
+            "transport": {"streaming_note": STREAMING_NOTE},
+            "controls": {
+                "chat_completions": {
+                    **self._control("chat_completions", capabilities, transport),
+                    "value": defaults.chat_completions,
+                    "note": (
+                        "the same model on the other API: chat.completions.create "
+                        "instead of responses.create. Chosen per request, and it "
+                        "changes which controls can be sent at all"
+                    ),
+                },
+                "reasoning_effort": {
+                    **self._control("reasoning_effort", capabilities, transport),
+                    "value": OMITTED,
+                    "options": option_list((OMITTED, *REASONING_EFFORTS)),
+                    "note": "sent as reasoning.effort; default leaves the field out",
+                },
+                "reasoning_max_tokens": {
+                    **self._control("reasoning_max_tokens", capabilities, transport),
+                    "value": None,
+                    "min": 1,
+                    "note": "sent as reasoning.max_tokens; empty leaves the field out",
+                },
+                "reasoning_enabled": {
+                    **self._control("reasoning_enabled", capabilities, transport),
+                    "value": None,
+                    "note": (
+                        "sent as reasoning.enabled. Three states, not two: "
+                        "off is a request, and untouched is not"
+                    ),
+                },
+                "reasoning_summary": {
+                    **self._control("reasoning_summary", capabilities, transport),
+                    "value": OMITTED,
+                    "options": option_list((OMITTED, *REASONING_SUMMARIES)),
+                    "note": "sent as reasoning.summary",
+                },
+                "web_search": {
+                    **self._control("web_search", capabilities, transport),
+                    "value": defaults.web_search,
+                    "note": (
+                        "the plugin's own web search tool, sent as "
+                        f"{WEB_SEARCH_TYPE}"
+                    ),
+                },
+                "max_uses": {
+                    **self._control("web_search", capabilities, transport),
+                    "value": None,
+                    "note": "a ceiling on the search tool; empty leaves it out",
+                },
+                "search_context_size": {
+                    **self._control("web_search", capabilities, transport),
+                    "value": None,
+                    "options": option_list((OMITTED, *SEARCH_CONTEXT_SIZES)),
+                    "note": "how much of each result the search tool returns",
+                },
+                "routing": {
+                    **self._control("provider", capabilities, transport),
+                    "value": None,
+                    "note": (
+                        "OpenRouter's own provider routing object, sent as "
+                        "`provider`. Which upstream serves the model, in its own "
+                        "vocabulary rather than a simplified one"
+                    ),
+                },
+                "stream": {
+                    "status": turn.RUNTIME_FIXED,
+                    "value": "ON",
+                    "editable": False,
+                    "sdk_method": f"{transport.call}(...)",
+                    "options": [
+                        {"value": "ON", "disabled": False},
+                        {
+                            "value": "OFF",
+                            "disabled": True,
+                            "note": "API supported · not used by llm-openrouter",
+                        },
+                    ],
+                    "note": STREAMING_NOTE,
+                },
+            },
+            "vocabulary": {
+                "reasoning_efforts": list(REASONING_EFFORTS),
+                "reasoning_summaries": list(REASONING_SUMMARIES),
+                "search_context_sizes": list(SEARCH_CONTEXT_SIZES),
+                "omitted": OMITTED,
+                "unavailable_on_responses": list(UNAVAILABLE_ON_RESPONSES),
+                "pricing": capabilities.pricing,
+            },
+        }
+
+    def _control(
+        self,
+        option: str,
+        capabilities: OpenRouterCapabilities,
+        transport: Transport,
+    ) -> dict:
+        """One control's status, in the words the page greys it out with.
+
+        The internal code is deliberately not passed on. It is what decides
+        which of the four answers this is, and a page given it would sooner or
+        later branch on it - putting a capability decision in a UI conditional,
+        where the next model's rules cannot reach it.
+        """
+        status, note = capabilities.option_status(option, transport)
+        control = {"status": STATUS_WORDS[status]}
+        if note:
+            control["unavailable_note"] = note
+        return control
+
     def request_facts(self, kwargs: dict) -> dict:
         """What the pane can say about this request that the form cannot.
 
@@ -1003,17 +1207,16 @@ class OpenRouterProvider:
         )
         hidden = tuple(model_id for model_id in registered if model_id not in newest)
         return {
-            # One snapshot for the whole list: the catalogue is a 800KB
-            # document, and re-reading it per model turned a list of fifty
-            # into fifty parses of it.
-            "models": [
-                self.capabilities_for(model_id, facts).as_dict() for model_id in newest
-            ],
+            # Ids, not descriptions: the dropdown shows what goes on the wire,
+            # and the selected model's facts come from /api/form. Both
+            # providers answer in the same shape, because the page reads one
+            # list and must not learn which provider filled it.
+            "models": list(newest),
             "superseded": [
                 {
                     "id": model_id,
                     "series": openrouter_series_for(model_id).key,
-                    "newest": _newest_of(model_id, newest),
+                    "kept_by": _newest_of(model_id, newest),
                 }
                 for model_id in hidden
             ],
