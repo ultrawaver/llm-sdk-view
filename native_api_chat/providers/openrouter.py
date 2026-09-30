@@ -23,11 +23,12 @@ around.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .. import openrouter_api
 from ..model_series import OPENROUTER_RULE, newest_per_series, openrouter_series_for
+from ..turn import TurnOptions, UnsupportedOptionError
 from .base import Transport
 
 MODEL_PREFIX = "openrouter/"
@@ -138,6 +139,35 @@ NOT_SENT_BY_PLUGIN = "not-sent-by-plugin"
 UNKNOWN_TO_CATALOGUE = "unknown-to-catalogue"
 
 
+# OpenRouter's reasoning surface is four separate fields, and they are kept
+# four separate controls for the same reason thinking and effort are kept
+# apart on the Anthropic side: they are separate API fields, and a single
+# slider that wrote to whichever one seemed to fit would be inventing a
+# parameter the API does not have.
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+REASONING_SUMMARIES = ("auto", "concise", "detailed")
+
+# "default" means the field is left off the request, so OpenRouter's own
+# default applies. Absence on the wire means the provider default applied -
+# never that a value was lost.
+OMITTED = "default"
+
+SEARCH_CONTEXT_SIZES = ("low", "medium", "high")
+
+# Options the Responses path refuses outright, quoted from the plugin:
+# "The OpenRouter Responses API does not support these options: ...". It
+# raises rather than dropping them, so a form that offered them would turn a
+# turn into a traceback.
+REFUSED_ON_RESPONSES = ("stop", "logit_bias", "seed")
+
+# What the plugin calls each form field. Only the ones that differ are here.
+# `provider` is OpenRouter's routing object, and the form calls it `routing`
+# because "provider" already means something else in every other module of
+# this project - the mapping happens here and nowhere else, so the pane can
+# still print the field by its real name.
+PLUGIN_OPTION_NAMES = {"routing": "provider"}
+
+
 def uses_chat_completions(options: Any) -> bool:
     """Whether this turn takes the Chat Completions path.
 
@@ -147,9 +177,138 @@ def uses_chat_completions(options: Any) -> bool:
     return bool(getattr(options, "chat_completions", False))
 
 
+@dataclass(frozen=True)
+class OpenRouterOptions(TurnOptions):
+    """Every value OpenRouter's chat form can set.
+
+    Not a superset of the Anthropic form and not a subset of it. The overlap
+    is the three fields in :class:`~native_api_chat.turn.TurnOptions`; the
+    rest of this is OpenRouter's own API, which is the whole reason it is here
+    as a provider rather than as a row in somebody else's list.
+    """
+
+    # Which of the two calls this turn makes. It is a request-level choice,
+    # not a model-level one, and it changes what else is allowed.
+    chat_completions: bool = False
+    reasoning_effort: str = OMITTED
+    reasoning_max_tokens: int | None = None
+    reasoning_enabled: bool | None = None
+    reasoning_summary: str = OMITTED
+    web_search: bool = False
+    # None means "omit", which is the tool's own default rather than a limit
+    # this project invented.
+    max_uses: int | None = None
+    search_context_size: str | None = None
+    routing: dict | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.reasoning_effort != OMITTED and self.reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(
+                f"reasoning_effort must be {OMITTED} or one of {REASONING_EFFORTS}"
+            )
+        if self.reasoning_summary != OMITTED and self.reasoning_summary not in REASONING_SUMMARIES:
+            raise ValueError(
+                f"reasoning_summary must be {OMITTED} or one of {REASONING_SUMMARIES}"
+            )
+        if self.reasoning_max_tokens is not None and self.reasoning_max_tokens < 1:
+            raise ValueError("reasoning_max_tokens must be a positive integer")
+        # The plugin's own floor, so the refusal happens on the form rather
+        # than inside the tool's constructor.
+        if self.max_uses is not None and self.max_uses < 1:
+            raise ValueError("max_uses must be a positive integer, or absent for no limit")
+        if (
+            self.search_context_size is not None
+            and self.search_context_size not in SEARCH_CONTEXT_SIZES
+        ):
+            raise ValueError(f"search_context_size must be one of {SEARCH_CONTEXT_SIZES}")
+        if self.routing is not None and not isinstance(self.routing, dict):
+            raise ValueError("routing must be a JSON object")
+
+
 def slug_for(model_id: str) -> str:
     """The id OpenRouter knows, with llm's routing prefix removed."""
     return model_id[len(MODEL_PREFIX) :] if model_id.startswith(MODEL_PREFIX) else model_id
+
+
+def _wire_value(value: Any) -> Any:
+    """An option's value as the wire carries it, not as Python spells it.
+
+    The plugin's options are ``str`` enums, so ``json.dumps`` already writes
+    ``"high"`` - but ``str()`` writes ``ReasoningEffortEnum.high``, and a
+    record is read back by more than one thing. What is reported is the value
+    that is really in the request.
+    """
+    return getattr(value, "value", value)
+
+
+def _server_tool_class(model: Any, name: str):
+    """The plugin's own tool class, looked up on the model that will send it."""
+    for tool_class in getattr(model, "supported_server_side_tools", ()):
+        if getattr(tool_class, "name", None) == name:
+            return tool_class
+    raise UnsupportedOptionError(f"{model.model_id} has no {name} server tool")
+
+
+def _find_web_search_tool(kwargs: dict) -> dict | None:
+    """The web search tool in a built request, on either transport.
+
+    Both paths put server tools in ``tools``, but the Responses path names
+    them by ``type`` while a function tool is named by ``name``, so the type
+    prefix is what identifies OpenRouter's hosted one.
+    """
+    for tool in kwargs.get("tools", ()):
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") == "openrouter:web_search":
+            return tool
+    return None
+
+
+def _verify_system(options: OpenRouterOptions, kwargs: dict, on_chat: bool) -> None:
+    """The system prompt has to land in whichever field this path uses."""
+    wanted = options.system.strip()
+    if on_chat:
+        first = (kwargs.get("messages") or [{}])[0]
+        carried = first.get("content") if first.get("role") == "system" else None
+    else:
+        carried = kwargs.get("instructions")
+    if not wanted:
+        if carried:
+            raise ValueError("system is empty but the request carries a system prompt")
+        return
+    if carried != options.system:
+        raise ValueError("the request system prompt does not match the form")
+
+
+def _verify_reasoning(options: OpenRouterOptions, kwargs: dict, on_chat: bool) -> None:
+    """Each of the four reasoning fields, where this path really puts it.
+
+    The Chat Completions path nests the block under ``extra_body`` while the
+    Responses path has it at the top level, and ``summary`` never appears on
+    the first one at all - which is why asking for it there is refused before
+    a request is ever built.
+    """
+    block = (
+        (kwargs.get("extra_body") or {}).get("reasoning")
+        if on_chat
+        else kwargs.get("reasoning")
+    ) or {}
+    for field, wanted, absent in (
+        ("effort", options.reasoning_effort, OMITTED),
+        ("max_tokens", options.reasoning_max_tokens, None),
+        ("enabled", options.reasoning_enabled, None),
+        ("summary", options.reasoning_summary, OMITTED),
+    ):
+        if wanted == absent:
+            if field in block:
+                raise ValueError(
+                    f"reasoning {field} was not asked for but the request carries it"
+                )
+        elif block.get(field) != wanted:
+            raise ValueError(
+                f"the request reasoning {field} is {block.get(field)!r}, not {wanted!r}"
+            )
 
 
 def available_model_ids() -> tuple[str, ...]:
@@ -367,6 +526,151 @@ class OpenRouterProvider:
         from llm_openrouter import OpenRouterChat
 
         return OpenRouterChat(**model._delegate_chat_kwargs())
+
+    # ---- the turn --------------------------------------------------------
+
+    def accept(
+        self, options: OpenRouterOptions, capabilities: OpenRouterCapabilities
+    ) -> OpenRouterOptions:
+        """These options, resolved - or a refusal saying which one and why.
+
+        Two of the refusals below are transport constraints rather than model
+        ones, which is what makes ``chat_completions`` more than a rendering
+        choice: flipping it takes web search away and makes
+        ``reasoning_summary`` a field that never reaches the wire. Both are
+        refused rather than silently dropped, because a form that showed a
+        summary setting on a request that cannot carry one is describing a
+        request nobody sent.
+        """
+        transport = CHAT_COMPLETIONS if options.chat_completions else RESPONSES
+        if options.chat_completions:
+            if options.web_search:
+                raise UnsupportedOptionError(
+                    "llm-openrouter refuses server-side tools on the "
+                    "chat.completions path, so web search is unavailable "
+                    "while that transport is selected"
+                )
+            if options.reasoning_summary != OMITTED:
+                raise UnsupportedOptionError(
+                    NOT_SENT[CHAT_COMPLETIONS.name]["reasoning_summary"]
+                )
+        for option, value in (
+            ("reasoning_effort", options.reasoning_effort != OMITTED),
+            ("reasoning_max_tokens", options.reasoning_max_tokens is not None),
+            ("reasoning_enabled", options.reasoning_enabled is not None),
+            ("reasoning_summary", options.reasoning_summary != OMITTED),
+        ):
+            if not value:
+                continue
+            status, reason = capabilities.option_status(option, transport)
+            if status == UNSUPPORTED_BY_MODEL:
+                raise UnsupportedOptionError(reason)
+        if options.web_search and not capabilities.supports("tools"):
+            # Only when the catalogue actually said so. It cannot refuse on
+            # behalf of a model it has never described.
+            if capabilities.described:
+                raise UnsupportedOptionError(
+                    f"{capabilities.slug} does not list tools as a supported "
+                    "parameter, so it cannot be given a server-side tool"
+                )
+        ceiling = capabilities.max_output_tokens
+        if ceiling and options.max_tokens > ceiling:
+            raise ValueError(
+                f"max_tokens must be at most {ceiling} for {capabilities.slug}: "
+                "that is the ceiling the serving endpoint reports"
+            )
+        return replace(options)
+
+    def plugin_options(self, options: OpenRouterOptions) -> dict:
+        """The option dict ``llm`` is given, in the plugin's own names.
+
+        Every "default" is expressed by leaving the field out, so the request
+        carries no field the user did not ask for and the provider's own
+        default is what applies.
+        """
+        built: dict[str, Any] = {"max_tokens": options.max_tokens}
+        if options.chat_completions:
+            built["chat_completions"] = True
+        if options.reasoning_effort != OMITTED:
+            built["reasoning_effort"] = options.reasoning_effort
+        if options.reasoning_max_tokens is not None:
+            built["reasoning_max_tokens"] = options.reasoning_max_tokens
+        if options.reasoning_enabled is not None:
+            built["reasoning_enabled"] = options.reasoning_enabled
+        if options.reasoning_summary != OMITTED:
+            built["reasoning_summary"] = options.reasoning_summary
+        if options.routing:
+            built[PLUGIN_OPTION_NAMES["routing"]] = dict(options.routing)
+        return built
+
+    def tools(self, model: Any, options: OpenRouterOptions) -> list:
+        """The plugin's own WebSearch, never a description of it.
+
+        Building the spec by hand here would be the second copy of a request
+        this project exists to avoid: the tool's ``tool_spec()`` is what ends
+        up on the wire, so the tool object is what has to be constructed.
+        """
+        if not options.web_search:
+            return []
+        tool_class = _server_tool_class(model, "web_search")
+        kwargs: dict[str, Any] = {}
+        if options.max_uses is not None:
+            kwargs["max_uses"] = options.max_uses
+        if options.search_context_size is not None:
+            kwargs["search_context_size"] = options.search_context_size
+        return [tool_class(**kwargs)]
+
+    def verify(self, options: OpenRouterOptions, kwargs: dict) -> None:
+        """Refuse to stream a request that contradicts the form.
+
+        The two transports name the same settings differently, so this reads
+        whichever pair of names the turn actually built rather than one shape
+        it assumed.
+        """
+        on_chat = options.chat_completions
+        ceiling_field = "max_tokens" if on_chat else "max_output_tokens"
+        if kwargs.get(ceiling_field) != options.max_tokens:
+            raise ValueError(
+                f"the request {ceiling_field} does not match the form"
+            )
+        _verify_system(options, kwargs, on_chat)
+        _verify_reasoning(options, kwargs, on_chat)
+
+        tool = _find_web_search_tool(kwargs)
+        if options.web_search and tool is None:
+            raise ValueError("web_search is on but no web search tool was built")
+        if not options.web_search:
+            if tool is not None:
+                raise ValueError("web_search is off but a web search tool was built")
+            return
+        parameters = tool.get("parameters") or {}
+        if options.max_uses is None:
+            if "max_uses" in parameters:
+                raise ValueError("max_uses was not set but the request limits uses")
+        elif parameters.get("max_uses") != options.max_uses:
+            raise ValueError("the request max_uses does not match the form")
+        if (
+            options.search_context_size is not None
+            and parameters.get("search_context_size") != options.search_context_size
+        ):
+            raise ValueError("the request search_context_size does not match the form")
+
+    def request_facts(self, kwargs: dict) -> dict:
+        """What the pane can say about this request that the form cannot.
+
+        Read off the built request, never off the options: the routing object
+        and the reasoning block are what the endpoint will act on, and the
+        form is only what asked for them.
+        """
+        extra = kwargs.get("extra_body") or {}
+        reasoning = kwargs.get("reasoning") or extra.get("reasoning") or {}
+        tool = _find_web_search_tool(kwargs)
+        return {
+            "reasoning": {key: _wire_value(value) for key, value in reasoning.items()}
+            or None,
+            "routing": dict(extra.get("provider") or {}) or None,
+            "web_search": tool.get("type") if tool else None,
+        }
 
     # ---- what the model can do -------------------------------------------
 
