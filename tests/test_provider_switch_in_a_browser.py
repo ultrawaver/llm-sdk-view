@@ -795,3 +795,97 @@ def test_an_openrouter_turn_shows_what_it_cost(sending, fake_openrouter):
     # left as rows that read $0.00.
     assert "OpenRouter reports no count" in pop, pop
     assert page.errors == []
+
+
+def test_both_cost_scopes_are_openrouter_too(sending, fake_openrouter):
+    """The two surfaces Anthropic already had, priced from the other side.
+
+    Hovering an answer shows *that turn's* receipt; the footer shows the
+    conversation's. Neither is written per provider - both read a cost off
+    the turn - so what is being checked is that nothing in either path
+    assumed Anthropic. The second turn costs a different amount on purpose:
+    a footer that had gone on describing one turn could not produce the
+    figure it shows, and a receipt that ignored which bubble it is over
+    could not tell the two apart.
+    """
+    page = sending
+    switch_to(page, "openrouter")
+
+    def answered_by(output_tokens, cached_tokens):
+        fake_openrouter.answers(
+            "Hi there.",
+            usage={
+                "input_tokens": 1200,
+                "output_tokens": output_tokens,
+                "input_tokens_details": {"cached_tokens": cached_tokens},
+            },
+        )
+
+    answered_by(900, 1024)
+    page.fill("#prompt", "first")
+    page.click("#send")
+    page.wait_for_function(
+        "() => state.turns.length === 1"
+        " && state.turns[0].response.cost !== null"
+    )
+    answered_by(300, 0)
+    page.fill("#prompt", "second")
+    page.click("#send")
+    page.wait_for_function(
+        "() => state.turns.length === 2"
+        " && state.turns[1].response.cost !== null"
+    )
+
+    per_turn = page.evaluate(
+        "() => state.turns.map((turn) => turn.response.cost.total)"
+    )
+    assert all(isinstance(total, (int, float)) for total in per_turn), per_turn
+    assert per_turn[0] != per_turn[1], per_turn
+
+    # The footer owns the conversation's figure, and it is the sum.
+    footer = page.evaluate(
+        """() => ({
+            total: byId('costTotal').textContent,
+            turns: byId('costTokens').textContent,
+            sum: money(state.turns.reduce(
+                (sum, turn) => sum + turn.response.cost.total, 0)),
+        })"""
+    )
+    assert footer["turns"] == "2 turns", footer
+    assert footer["total"] == footer["sum"], footer
+
+    def receipt_over(index):
+        """The card the bubble at ``index`` hovers up, once it is that one."""
+        page.locator("#messages .msg.assistant").nth(index).hover()
+        page.wait_for_function(
+            "(want) => byId('settingsCard').textContent.includes(want)",
+            arg="turn " + str(index + 1) + " \u00b7 cost",
+        )
+        return page.evaluate(
+            """() => {
+                const card = byId('settingsCard');
+                return {
+                    cls: card.className,
+                    text: card.textContent,
+                    total: card.querySelector('.cost-total-row .num').textContent,
+                    rows: card.querySelectorAll('.cost-line').length,
+                };
+            }"""
+        )
+
+    second = receipt_over(1)
+    assert "costcard" in second["cls"], second
+    # The rows are the other provider's, read from its own price list.
+    assert "Uncached input" in second["text"], second
+    assert "Cache read (hit)" in second["text"], second
+    assert "openai/gpt-5.4" in second["text"], second
+    assert second["rows"] >= 3, second
+    assert second["total"] == page.evaluate("(v) => money(v)", per_turn[1]), second
+    # Not the conversation's figure: the two scopes are two different numbers.
+    assert second["total"] != footer["total"], second
+
+    first = receipt_over(0)
+    assert first["total"] == page.evaluate("(v) => money(v)", per_turn[0]), first
+    assert first["total"] != second["total"], (first, second)
+
+    assert page.errors == []

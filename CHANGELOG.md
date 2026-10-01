@@ -919,6 +919,13 @@ turn. Cleared with the database it belongs to.
   (`tests/test_openrouter_rates.py`, `tests/test_openrouter_pricing.py`), and
   one browser test measures an OpenRouter turn's receipt in the page rather
   than off the payload.
+- Both cost surfaces are now measured on OpenRouter as well as Anthropic -
+  hovering an answer shows that turn's receipt, the footer shows the
+  conversation's - with two turns priced *differently*, so a footer that had
+  gone on describing a single turn could not produce the figure it shows and
+  a receipt that ignored which bubble it is over could not tell them apart.
+  The check was confirmed to fail when the provider is dropped from the cost
+  call, which is the defect it exists to catch.
 - `AGENTS.md`'s pricing boundary named the pricing page as *the* source of
   unit prices. It now names both, and states which counter each provider
   reports - that bullet is what a later change is most likely to read instead
