@@ -444,12 +444,28 @@ async def version(request: Request) -> JSONResponse:
 
 
 async def rates(request: Request) -> JSONResponse:
-    """Where the unit prices came from, and how many models they cover."""
+    """Where the unit prices came from, one answer per provider.
+
+    There are two sources of prices now, and they are not the same document:
+    Anthropic's pricing page, and OpenRouter's own catalogue. "No estimate"
+    has to name the right one - telling an OpenRouter turn that the pricing
+    page could not be read sends the reader somewhere that was never asked -
+    so both answers are sent and the page picks the one behind the provider it
+    is showing.
+    """
     from .pricing import rates_status
 
-    status = rates_status()
-    status["models"] = len(rates_page.snapshot()["rates"])
-    return JSONResponse(status)
+    anthropic = rates_status()
+    anthropic["models"] = len(rates_page.snapshot()["rates"])
+    return JSONResponse(
+        {
+            "sources": {
+                "anthropic": anthropic,
+                "openrouter": rates_status("openrouter"),
+            }
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def create_app() -> Starlette:

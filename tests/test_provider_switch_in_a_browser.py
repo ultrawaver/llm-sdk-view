@@ -751,3 +751,47 @@ def test_reopening_hands_the_form_back_to_the_conversations_own_provider(sending
         "() => byId('model').selectedOptions[0].dataset.superseded"
     ) is None
     assert "legacy" not in page.text_content('[data-pill="model"]')
+
+
+def test_an_openrouter_turn_shows_what_it_cost(sending, fake_openrouter):
+    """The receipt is the same one, priced from the other provider's prices.
+
+    Measured in the page and not off the payload: the figures come from the
+    catalogue the model list already caches, and "what OpenRouter does not
+    report" only means something if a reader can see it said.
+    """
+    page = sending
+    fake_openrouter.answers(
+        "Hi there.",
+        usage={
+            "input_tokens": 1200,
+            "output_tokens": 900,
+            "input_tokens_details": {"cached_tokens": 1024},
+        },
+    )
+    switch_to(page, "openrouter")
+    page.fill("#prompt", "hello")
+    page.click("#send")
+    page.wait_for_function(
+        "() => state.turns.length === 1"
+        " && state.turns[0].response.cost !== null"
+    )
+
+    cost = page.evaluate("() => state.turns[0].response.cost")
+    assert cost["rates_source"] == "OpenRouter catalogue"
+    assert cost["rates_state"] == "live"
+    assert cost["total"] > 0
+    # Cached tokens are a slice of the prompt, not a second count on top.
+    assert cost["input_total_tokens"] == 1200
+
+    page.wait_for_function("() => byId('costTotal').textContent !== '\u2013'")
+    assert page.text_content("#costTotal").startswith("$0.0")
+    assert page.text_content("#costTokens") == "1 turn"
+    page.click("#costToggle")
+    pop = page.text_content("#costPop")
+    assert "OpenRouter catalogue" in pop, pop
+    assert "Uncached input" in pop and "Cache read (hit)" in pop, pop
+    # And the two counters this API does not report are named rather than
+    # left as rows that read $0.00.
+    assert "OpenRouter reports no count" in pop, pop
+    assert page.errors == []

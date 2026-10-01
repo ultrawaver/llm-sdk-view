@@ -299,6 +299,14 @@ function conversationTotals() {
   let inputTotal = 0;
   let noCacheTotal = 0;
   let provenance = null;
+  // Notes that hold for the whole conversation and not only for one turn of
+  // it. A note survives only when every priced turn produced it - the same
+  // rule the rows above use for "reported", and for the same reason: a
+  // sentence about one turn, repeated under a total, becomes a sentence about
+  // the total that nothing ever checked. Turn-scoped wording ("... for this
+  // turn") stops being offered the moment the turns stop agreeing on it, and
+  // the conversation still says what it can in its own terms.
+  let agreedNotes = null;
   state.turns.forEach((record) => {
     const cost = record.response && record.response.cost;
     if (!cost || typeof cost.total !== 'number') return;
@@ -308,6 +316,10 @@ function conversationTotals() {
     noCacheTotal += cost.no_cache_total || 0;
     if (cost.model) models.add(cost.model);
     provenance = provenance || cost;
+    const ownNotes = cost.notes || [];
+    agreedNotes = agreedNotes === null
+      ? ownNotes.slice()
+      : agreedNotes.filter((text) => ownNotes.includes(text));
     (cost.lines || []).forEach((line) => {
       const kept = lines.get(line.key);
       if (!kept) { lines.set(line.key, { ...line }); return; }
@@ -333,6 +345,7 @@ function conversationTotals() {
     missingCounters,
     models: Array.from(models),
     lines: sums,
+    notes: agreedNotes || [],
     total,
     input_total_tokens: inputTotal,
     output_tokens: output ? output.quantity : null,
@@ -359,18 +372,29 @@ const COST_GROUP_NAMES = { input: 'Input', output: 'Output', tools: 'Tools' };
 
 /* Why a figure is missing, in the terms the surface asking needs. Prices are
    fetched rather than shipped, so "no estimate" has more than one honest
-   reason: the page could not be read, or this model is not on it. The rates
-   answer is read under the names the server sends - ``rates_state`` and
-   ``rates_error``; reading ``state``/``error`` here silently matched nothing
-   and left the first reason unreachable. */
+   reason: the source could not be read, or this model is not on it. There are
+   two sources now - Anthropic's pricing page and OpenRouter's own catalogue -
+   so the answer is read for the provider the form is showing: naming the
+   other one sends the reader to a document nobody asked.
+   The rates answer is read under the names the server sends - ``rates_state``
+   and ``rates_error``; reading ``state``/``error`` here silently matched
+   nothing and left the first reason unreachable. */
+function currentRates() {
+  const sources = state.rates && state.rates.sources;
+  if (!sources) return null;
+  const id = (state.data.provider && state.data.provider.id) || 'anthropic';
+  return sources[id] || sources.anthropic || null;
+}
+
 function noCostReason(scope) {
   if (!state.turns.length) return 'send a turn to see what it cost';
-  if (state.rates && state.rates.rates_state === 'unavailable') {
+  const rates = currentRates();
+  if (rates && rates.rates_state === 'unavailable') {
     return 'no rates: '
-      + (state.rates.rates_error || 'the pricing page could not be read');
+      + (rates.rates_error || 'the pricing source could not be read');
   }
   return scope === 'turn'
-    ? 'the pricing page does not cover this turn\u2019s model'
+    ? 'the rates do not cover this turn\u2019s model'
     : 'no cost estimate for this conversation';
 }
 
@@ -476,10 +500,13 @@ function costReceiptHtml(cost, { note = false } = {}) {
       + fmt(read ? read.quantity : 0) + ' ÷ total input '
       + fmt(cost.input_total_tokens) + ' · ' + savings + '</div>';
   }
-  if (cost.cache_counters_reported === false) {
-    cache += '<div class="cost-formula">cache counters were not reported '
-      + '(caching off) — the cache lines read $0</div>';
-  }
+  // Why the figures are what they are, in the sending provider's own terms.
+  // The two APIs report different counters - OpenRouter reports no cache
+  // write and no search count at all - so a sentence written here would be
+  // about one of them. The server knows which one sent the turn.
+  (cost.notes || []).forEach((text) => {
+    cache += '<div class="cost-formula">' + esc(text) + '</div>';
+  });
 
   return '<div class="cost-stack">' + stack + '</div>'
     + receipt

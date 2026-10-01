@@ -182,6 +182,45 @@ its natural width (418px, measured) the hit rate is dropped instead of halved.
 It is the one figure the bar can do without - it is derived from the receipt's
 own lines, which print the arithmetic in full.
 
+## Where a price comes from
+
+Two providers, two published documents, and neither is committed here:
+
+| | Anthropic | OpenRouter |
+|---|---|---|
+| Source | the pricing page, read as markdown | the model catalogue, `/api/v1/models` |
+| Cache | `~/.cache/native-api-chat/rates.json`, 12h | `openrouter-models.json`, 6h |
+| A key | needed for the Models API, not for the page | none - the catalogue is public |
+
+OpenRouter's prices are the one thing that did not need a new fetch: every
+catalogue entry carries `prompt`, `completion`, `input_cache_read`,
+`input_cache_write` and a per-request `web_search`, so reading them is a
+reading of a document the model list already caches. One request returns all
+four hundred and sixty-four models; four of them are priced at zero without
+being on the free tier, so they are dropped rather than shown as $0.00.
+
+The two APIs do not spell the same thing the same way, so they are priced by
+two functions rather than by one with a provider flag:
+
+- Anthropic reports the **uncached** part of the prompt as `input_tokens` and
+  bills cache writes and reads beside it - so the turn's total input is their
+  sum.
+- OpenRouter reports the **whole prompt**, cached part included, because llm
+  reads its `prompt_tokens`. The cached tokens are a slice of that number and
+  not a second count on top, and billing both would charge them twice.
+
+OpenRouter reports no cache-write count on either transport, and no search
+count reaches this app. Neither is invented, and where a model's row prices a
+write or a search the receipt names the gap - an absent row reads as a free
+one otherwise. A cache read this app cannot see is priced at the input rate,
+and the line says it was unreported rather than reported as zero.
+
+Two more facts live in the catalogue and are read rather than derived: the
+`:batch` and `:free` tiers are rows of their own, matched exactly, because
+matching a batch row against its base model would charge double; and a
+long-context override is applied from the turn's own prompt size, so the rate
+printed on the receipt is the rate that was charged.
+
 ## Control status
 
 Every form control reports one status, so a greyed-out value always says why:

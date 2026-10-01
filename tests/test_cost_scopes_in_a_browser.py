@@ -403,8 +403,12 @@ def test_the_footer_says_why_there_is_no_estimate(
             status=200,
             content_type="application/json",
             body=json.dumps({
-                "rates_state": "unavailable",
-                "rates_error": "the pricing page could not be read",
+                "sources": {
+                    "anthropic": {
+                        "rates_state": "unavailable",
+                        "rates_error": "the pricing page could not be read",
+                    }
+                }
             }),
         ),
     )

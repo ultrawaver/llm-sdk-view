@@ -874,3 +874,48 @@ turn. Cleared with the database it belongs to.
   later, and a throw or a slow render in between is invisible to that
   condition. They now wait for the transcript itself, and for it to be new
   nodes, since the transcript already on screen counts the same.
+
+### An OpenRouter turn is priced from OpenRouter's prices
+
+- **An OpenRouter turn showed no cost at all**, and the reason was not that no
+  price was available. The catalogue this app already fetches, already caches
+  for six hours and already reads the model list out of carries `pricing` on
+  every entry, and nothing had ever read that field: `cost_breakdown` looked in
+  Anthropic's pricing page whatever model was selected. `rates_openrouter.py`
+  reads the prices out of the snapshot that is already on disk, so this adds no
+  fetch, needs no key, and covers all of the catalogue rather than the models
+  someone had written a rate for by hand.
+- **The two APIs do not count the same way, so they are not priced the same
+  way.** Anthropic reports the *uncached* part of the prompt as `input_tokens`
+  and bills cache writes and reads beside it; OpenRouter reports the whole
+  prompt and nests the cache read inside it. Charging the whole prompt at the
+  input rate *and* the cache read at its own rate bills the cached tokens
+  twice - a number that looks like a working figure and is wrong. Each provider
+  now has its own function, and each docstring says which of its counters is
+  which.
+- **A response cannot say who sent it.** OpenRouter answers with its catalogue
+  slug, which carries none of llm's routing prefix, so the model id in a
+  finished turn read as belonging to no provider and the turn was then priced
+  from the wrong document. The receipt stayed empty until the view carried the
+  provider the turn was *sent* through - a fact the turn's own record already
+  had, from the form that sent it.
+- The receipt names what it left out rather than showing a `$0.00` row.
+  OpenRouter reports no cache-write count and no search count on either
+  transport, so neither is in the total, and the popover says so where the
+  model prices one. A note reaches a conversation's total only when every
+  priced turn agreed on it - a sentence about one turn, repeated under a total,
+  is a sentence about the total that nothing checked.
+- A cached read the API did not report prices nothing rather than an assumed
+  miss, and a model that publishes no cache-read rate produces no estimate at
+  all once a read really happened: pricing a cached token at the input rate
+  would be an invention, and an invented figure is worse than a missing one.
+- `GET /api/rates` answers per provider and the page asks about the provider it
+  is showing. A cached Anthropic rate must not be offered as the reason an
+  OpenRouter figure is missing, nor the other way round.
+- `docs/architecture.md` gains a "Where a price comes from" section: the two
+  sources, their cache lifetimes, and the counting difference above, since that
+  difference is the part a future reader is most likely to get wrong.
+- 27 unit tests read a catalogue rather than the network
+  (`tests/test_openrouter_rates.py`, `tests/test_openrouter_pricing.py`), and
+  one browser test measures an OpenRouter turn's receipt in the page rather
+  than off the payload.

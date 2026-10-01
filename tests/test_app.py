@@ -11,12 +11,19 @@ def test_health():
 
 
 def test_the_page_can_ask_where_the_rates_came_from():
-    """Prices are fetched at runtime, so the footer needs to be able to say so."""
+    """Prices are fetched at runtime, so the footer needs to be able to say so.
+
+    One answer per provider, because the two do not read the same document:
+    Anthropic's pricing page, OpenRouter's own catalogue. The page asks about
+    the provider it is showing.
+    """
     body = TestClient(app).get("/api/rates").json()
 
-    assert body["rates_state"] in {"live", "cached", "unavailable"}
-    assert body["rates_url"].startswith("https://")
-    assert isinstance(body["models"], int)
+    assert set(body["sources"]) == {"anthropic", "openrouter"}
+    for name, source in body["sources"].items():
+        assert source["rates_state"] in {"live", "cached", "unavailable"}, name
+        assert source["rates_url"].startswith("https://"), name
+        assert isinstance(source["models"], int), name
 
 
 def test_the_preview_is_not_a_second_request_template():

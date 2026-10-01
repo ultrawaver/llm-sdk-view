@@ -290,6 +290,11 @@ class ResponseView:
     # is nested on both OpenRouter paths, where Anthropic's spelling finds
     # nothing and every turn reads as a cache miss.
     counts: dict = field(default_factory=dict)
+    #: Which provider sent this turn, so its cost is read from that
+    #: provider's own prices. The model id cannot say: both providers price a
+    #: different document, and OpenRouter answers with the catalogue slug
+    #: (``openai/gpt-5.4``), which carries no prefix of llm's to recognise.
+    provider: str | None = None
     # Client-side latency. duration_ms is llm's own measurement (dispatch to
     # stream end); ttft_ms is this app's time to the first text chunk.
     # Older stored records predate both, so None means "not measured".
@@ -322,8 +327,17 @@ class ResponseView:
         Derived like ``raw``: recomputed on read, so a rate-table update
         re-prices every stored conversation. None when the model's rates are
         unknown - an estimate is never invented.
+
+        ``counts`` goes with it because the two providers put the same counter
+        in different places: OpenRouter nests the cache read, so pricing its
+        turns from the raw document would find nothing and charge every
+        cached token at the full input rate.
+
+        ``provider`` goes with it for the same reason: the two price different
+        documents, and only the provider that sent the turn can say which one
+        applies.
         """
-        return cost_breakdown(self.model, self.usage)
+        return cost_breakdown(self.model, self.usage, self.counts, self.provider)
 
     def as_dict(self) -> dict:
         return {
@@ -338,6 +352,7 @@ class ResponseView:
             "stop_reason": self.stop_reason,
             "usage": self.usage,
             "counts": self.counts,
+            "provider": self.provider,
             "summary": self.summary(),
             "response_json": self.response_json,
             "duration_ms": self.duration_ms,
@@ -364,6 +379,7 @@ class ResponseView:
             stop_reason=data.get("stop_reason"),
             usage=data.get("usage") or {},
             counts=data.get("counts") or {},
+            provider=data.get("provider"),
             response_json=data.get("response_json"),
             duration_ms=data.get("duration_ms"),
             ttft_ms=data.get("ttft_ms"),
@@ -410,6 +426,7 @@ def build_response_view(
         stop_reason=stop_reason,
         usage=_usage(response, message),
         counts=counts or {},
+        provider=getattr(provider, "id", None),
         response_json=message or None,
         duration_ms=_duration_ms(response),
         ttft_ms=ttft_ms,
