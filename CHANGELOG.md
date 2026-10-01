@@ -919,3 +919,7 @@ turn. Cleared with the database it belongs to.
   (`tests/test_openrouter_rates.py`, `tests/test_openrouter_pricing.py`), and
   one browser test measures an OpenRouter turn's receipt in the page rather
   than off the payload.
+- `AGENTS.md`'s pricing boundary named the pricing page as *the* source of
+  unit prices. It now names both, and states which counter each provider
+  reports - that bullet is what a later change is most likely to read instead
+  of the code, and as written it would have led straight back to the bug above.
