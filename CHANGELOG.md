@@ -930,3 +930,29 @@ turn. Cleared with the database it belongs to.
   unit prices. It now names both, and states which counter each provider
   reports - that bullet is what a later change is most likely to read instead
   of the code, and as written it would have led straight back to the bug above.
+
+### A stored turn is priced from the provider that sent it
+
+- **The two conversations already on disk still showed no cost.** The provider
+  field on a response arrived *with* the OpenRouter prices, so every turn
+  stored before it has none - and a stored OpenRouter turn's model is the
+  catalogue slug, an id no provider claims. Those turns fell back to
+  Anthropic's rates whatever model they were, and the page ended up blaming
+  "the rates" for not covering a model that the OpenRouter catalogue - the
+  document it had just read, four hundred and sixty rows of it - does cover.
+  Free turns sat at a dash with the popover disabled, beside a price that was
+  already on disk.
+- The id a turn was **sent with** is in the same row, and that is the id
+  `provider_for` exists to judge: `ResponseView.from_dict` now takes it as the
+  answer to use only when the record does not carry one. It is the same call
+  the app makes before sending, replayed on the same string, so nothing about
+  the past is inferred - and the stored value still wins wherever there is
+  one. A row whose model no provider claims keeps its honest "no estimate".
+- `load_conversation` had been selecting llm's own `turns.model` and never
+  reading it. That column looks like the answer to "who sent this turn" and is
+  not (it is `anthropic/claude-...`, which the provider that owns those ids
+  does not claim), so it is gone rather than left as the next trap.
+- One test stores an OpenRouter turn, deletes the provider off the row so it
+  looks exactly like the ones on disk, and checks the turn is priced from the
+  OpenRouter catalogue rather than left unpriced. It was confirmed red with
+  the fallback removed.

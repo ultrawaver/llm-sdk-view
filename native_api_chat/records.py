@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .pricing import cost_breakdown
+from .pricing import cost_breakdown, provider_of
 
 SOURCE = "native-api-chat"
 
@@ -50,6 +50,20 @@ def conversation_name(user_input: str) -> str:
     if space >= NAME_MIN_CHARS:
         cut = cut[:space]
     return cut.rstrip(" ,.:;") + "…"
+
+
+def provider_of_request(options: dict | None) -> str | None:
+    """Which provider sent a turn, read off the turn's own request.
+
+    A turn recorded before the response carried a provider still stores the
+    model id the form had selected, and that is the id ``provider_for`` is the
+    judge of - the same call this app makes before sending, replayed on the
+    same id. Asking it here reads the row instead of inferring from it.
+
+    None means no provider claims the id: a model from a plugin that is no
+    longer installed. Nothing is then answerable for its prices.
+    """
+    return provider_of((options or {}).get("model"))
 
 
 def _as_blocks(message: dict | None) -> list[dict]:
@@ -366,7 +380,16 @@ class ResponseView:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> ResponseView:
+    def from_dict(cls, data: dict, provider: str | None = None) -> ResponseView:
+        """Read a stored record back, with its own provider winning.
+
+        ``provider`` is for a record written before this field existed: the
+        stored value is used when there is one, and the caller's answer only
+        fills the gap. Stored turns have to keep saying who sent them - a
+        conversation whose provider is lost can no longer be priced from the
+        right document, and "no estimate" beside a price that exists is the
+        one wrong answer a receipt must not give.
+        """
         return cls(
             response_id=data.get("response_id"),
             message_id=data.get("message_id"),
@@ -379,7 +402,7 @@ class ResponseView:
             stop_reason=data.get("stop_reason"),
             usage=data.get("usage") or {},
             counts=data.get("counts") or {},
-            provider=data.get("provider"),
+            provider=data.get("provider") or provider,
             response_json=data.get("response_json"),
             duration_ms=data.get("duration_ms"),
             ttft_ms=data.get("ttft_ms"),
@@ -465,14 +488,18 @@ class TurnRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> TurnRecord:
+        options = data.get("options") or {}
         return cls(
             conversation_id=data["conversation_id"],
             turn_id=data.get("turn_id"),
             user_input=data.get("user_input", ""),
-            options=data.get("options") or {},
+            options=options,
             request_kwargs=data.get("request_kwargs") or {},
             rendered_code=data.get("rendered_code", ""),
-            response=ResponseView.from_dict(data.get("response") or {}),
+            response=ResponseView.from_dict(
+                data.get("response") or {},
+                provider_of_request(options),
+            ),
             context=data.get("context") or {},
             timestamp=data.get("timestamp", ""),
         )

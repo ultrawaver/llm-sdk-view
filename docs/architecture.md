@@ -221,6 +221,14 @@ matching a batch row against its base model would charge double; and a
 long-context override is applied from the turn's own prompt size, so the rate
 printed on the receipt is the rate that was charged.
 
+A turn is priced from the document of the provider that sent it, so history
+has to keep saying who that was. A response records it, and the rows written
+before that field existed do not have it - while the model on such a row is
+the catalogue slug, an id no provider claims. The provider is therefore read
+back off the id the turn was *sent with*, which is the id `provider_for`
+exists to judge: asking it there is the same call the app makes before
+sending, replayed on the same string, not an inference about the past.
+
 ## Control status
 
 Every form control reports one status, so a greyed-out value always says why:

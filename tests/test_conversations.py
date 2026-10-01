@@ -14,7 +14,7 @@ import json
 import pytest
 from starlette.testclient import TestClient
 
-from native_api_chat import store
+from native_api_chat import rates_openrouter, store
 from native_api_chat.app import SESSIONS, app
 
 SONNET = "claude-sonnet-5"
@@ -294,6 +294,78 @@ def test_an_unknown_conversation_is_not_an_empty_one(client, fake_provider):
     response = client.get("/api/conversations/does-not-exist")
 
     assert response.status_code == 404
+
+
+# --- who sent a stored turn -------------------------------------------------
+
+
+def test_a_row_that_predates_the_provider_field_is_priced_from_the_right_one(
+    client, database, openrouter_registry, fake_openrouter
+):
+    """The provider is read back off the row when the row does not carry one.
+
+    A response records the provider that sent it, and that field arrived with
+    the OpenRouter prices - so every conversation already on disk has none.
+    A stored OpenRouter turn's model is the catalogue slug, which no provider
+    claims, so the cost fell through to Anthropic's rates whatever the model
+    was: a turn priced in the catalogue came back "no estimate", and the page
+    blamed rates that had the model all along.
+
+    The id the turn was *sent with* is in the row and answers the same
+    question - it is the id ``provider_for`` exists to judge - so it is read
+    rather than guessed at.
+    """
+    (model,) = openrouter_registry("openai/gpt-5.4")
+    fake_openrouter.answers(
+        "hello",
+        usage={
+            "input_tokens": 20,
+            "output_tokens": 639,
+            "input_tokens_details": {"cached_tokens": 0},
+        },
+    )
+
+    saved = send(client, "hello", model=model)
+    conversation_id = saved["record"]["conversation_id"]
+    stored = json.loads(
+        database[store.SIDECAR_TABLE].get(saved["turn_id"])["response_json"]
+    )
+    assert stored["provider"] == "openrouter"
+    # Exactly what a row written before the field existed looks like.
+    del stored["provider"]
+    database[store.SIDECAR_TABLE].update(
+        saved["turn_id"], {"response_json": json.dumps(stored)}
+    )
+
+    loaded = client.get(f"/api/conversations/{conversation_id}").json()
+    response = loaded["turns"][0]["response"]
+
+    assert response["provider"] == "openrouter"
+    # The Anthropic page this used to be asked cannot price this model at
+    # all, so naming the document is what says the right one was asked.
+    assert response["cost"]["rates_source"] == rates_openrouter.RATES_SOURCE
+    assert response["cost"]["total"] > 0
+
+
+def test_a_record_that_does_say_which_provider_sent_it_keeps_its_word(
+    client, database, openrouter_registry, fake_openrouter
+):
+    """The stored value wins; the recovery only fills a gap."""
+    (model,) = openrouter_registry("vendor/model")
+    fake_openrouter.answers("hello")
+
+    saved = send(client, "hello", model=model)
+    stored = json.loads(
+        database[store.SIDECAR_TABLE].get(saved["turn_id"])["response_json"]
+    )
+    stored["provider"] = "someone-else"
+    database[store.SIDECAR_TABLE].update(
+        saved["turn_id"], {"response_json": json.dumps(stored)}
+    )
+
+    loaded = client.get(f"/api/conversations/{saved['record']['conversation_id']}").json()
+
+    assert loaded["turns"][0]["response"]["provider"] == "someone-else"
 
 
 # --- llm's own tooling can read it ------------------------------------------

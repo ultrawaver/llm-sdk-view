@@ -26,7 +26,13 @@ from llm.logs import LogStore
 from llm.migrations import migrate
 from sqlite_utils import Database
 
-from .records import SOURCE, ResponseView, TurnRecord, conversation_name
+from .records import (
+    SOURCE,
+    ResponseView,
+    TurnRecord,
+    conversation_name,
+    provider_of_request,
+)
 
 # A test needs a database of its own; nothing else should ever set this.
 DATABASE_ENV = "NATIVE_API_CHAT_LOGS_DB"
@@ -203,7 +209,6 @@ def load_conversation(thread_id: str, db: Database | None = None) -> dict | None
     for row in database.query(
         """
         select turns.id as turn_id,
-               turns.model as model,
                turns.datetime_utc as datetime_utc,
                side.user_input as user_input,
                side.effective_options as effective_options,
@@ -218,15 +223,22 @@ def load_conversation(thread_id: str, db: Database | None = None) -> dict | None
         """.replace("{sidecar}", SIDECAR_TABLE),
         [thread_id],
     ):
+        options = json.loads(row["effective_options"] or "{}")
         turns.append(
             TurnRecord(
                 conversation_id=thread_id,
                 turn_id=row["turn_id"],
                 user_input=row["user_input"] or "",
-                options=json.loads(row["effective_options"] or "{}"),
+                options=options,
                 request_kwargs=json.loads(row["request_kwargs"] or "{}"),
                 rendered_code=row["rendered_code"] or "",
-                response=ResponseView.from_dict(json.loads(row["response_json"] or "{}")),
+                # The provider is passed in because this row may predate the
+                # field that holds it: the request it was sent with is right
+                # here, and it answers the same question.
+                response=ResponseView.from_dict(
+                    json.loads(row["response_json"] or "{}"),
+                    provider_of_request(options),
+                ),
                 context=json.loads(row["context_json"] or "{}"),
                 timestamp=row["datetime_utc"] or "",
             )
