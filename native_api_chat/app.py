@@ -1,6 +1,8 @@
 import hashlib
 import json
+import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import llm
@@ -16,6 +18,14 @@ from .records import TurnRecord
 from .turn import TurnOptions
 
 STATIC = Path(__file__).parent / "static"
+
+# The Python this process is running, and when it began running it. A stale
+# *tab* and a stale *server* look identical from the page, and the asset
+# fingerprint cannot tell them apart: it is read off the disk on every
+# request, so a process that imported yesterday's code still answers with
+# today's file. These two facts are what tell them apart.
+PACKAGE = Path(__file__).parent
+LOADED_AT_NS = time.time_ns()
 
 # Live sessions. The durable copy of every conversation is in llm's own SQLite;
 # this dict only keeps the objects a page is currently talking through.
@@ -167,6 +177,44 @@ def asset_version(name: str) -> str:
     """
     stat = (STATIC / name).stat()
     return hashlib.sha1(f"{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:8]
+
+
+def newest_source_ns(root: Path | None = None) -> int:
+    """When the newest Python this process runs was last written.
+
+    ``static/`` is left out on purpose. The page's own files are read from
+    disk on every request, so they cannot be the stale half; only the modules
+    the process imported are frozen at their import.
+    """
+    newest = 0
+    for path in (root or PACKAGE).glob("*.py"):
+        try:
+            newest = max(newest, path.stat().st_mtime_ns)
+        except OSError:  # pragma: no cover - a file that vanished mid-scan
+            continue
+    return newest
+
+
+def _stamp(ns: int) -> str:
+    return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def server_state(loaded_at_ns: int | None = None, root: Path | None = None) -> dict:
+    """Whether this process is older than the code on disk.
+
+    Compared against the import rather than against the newest file: a module
+    written after this process read its own is a change it has never seen.
+    Touching a file without changing it reads as stale, which is the right way
+    to be wrong - it asks for a restart that costs seconds, and says nothing
+    about the numbers it is showing.
+    """
+    loaded = LOADED_AT_NS if loaded_at_ns is None else loaded_at_ns
+    newest = newest_source_ns(root)
+    return {
+        "loaded_at": _stamp(loaded),
+        "newest_source": _stamp(newest) if newest else None,
+        "stale": newest > loaded,
+    }
 
 
 async def index(request: Request) -> HTMLResponse:
@@ -429,16 +477,24 @@ async def health(request: Request) -> JSONResponse:
 
 
 async def version(request: Request) -> JSONResponse:
-    """The build the server would serve right now.
+    """The build the server would serve right now, and whether it is current.
 
-    A tab keeps its js until it is reloaded, and a local tool rebuilt several
-    times a day means a tab can easily run a build the server has already
-    replaced - reporting bugs that no longer exist. The page compares this
-    answer against the build it loaded and says so on itself when they
-    differ, instead of letting a stale tab impersonate the current one.
+    Two stale builds share one symptom and need opposite answers. A *tab*
+    keeps its js until it is reloaded, and a local tool rebuilt several times
+    a day means a tab can easily run a build the server has already replaced -
+    reporting bugs that no longer exist. ``version`` is compared against the
+    build the page loaded so a stale tab cannot impersonate the current one.
+
+    ``server`` answers the other direction, which the asset fingerprint cannot
+    see at all. Python is imported once: a process started before the last
+    commit serves the *current* ``app.js`` - read off the disk per request -
+    while running yesterday's logic behind it, and every build string on the
+    page is the new one. Nothing about the page looks wrong, and the mismatch
+    has been read as a data problem more than once. This is the fact that ends
+    the guessing.
     """
     return JSONResponse(
-        {"version": asset_version("app.js")},
+        {"version": asset_version("app.js"), "server": server_state()},
         headers={"Cache-Control": "no-store"},
     )
 

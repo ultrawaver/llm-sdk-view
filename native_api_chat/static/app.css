@@ -802,8 +802,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 
 /* --- the stale-build banner --------------------------------------------------
-   This tab's js is older than the build the server would serve now. Fixed,
-   centred and above everything; the whole banner is the reload button. */
+   Two mismatches, two answers. Either this tab's js is older than the build
+   the server would serve now - reload fixes that, and the whole banner is the
+   reload button - or the server process is older than the code on disk, which
+   a reload cannot touch, so that state is not clickable and does not pretend
+   to be (`.inert`). */
 
 #staleBanner {
   position: fixed;
@@ -823,6 +826,10 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 
 #staleBanner[hidden] { display: none; }
+
+/* Restarting the server is not something this page can do, so this state of
+   the banner carries no action and must not offer one. */
+#staleBanner.inert { cursor: default; }
 
 #buildStamp {
   font-family: var(--mono);

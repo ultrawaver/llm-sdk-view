@@ -3755,6 +3755,18 @@ const BUILD = (() => {
 byId('buildStamp').textContent = BUILD ? 'build ' + BUILD : '';
 
 let staleCheckedAt = 0;
+let staleBannerAction = null;
+
+function showStaleBanner(text, action) {
+  const banner = byId('staleBanner');
+  banner.textContent = text;
+  // A banner that cannot be acted on must not behave, or look, like one that
+  // can: reloading this tab does nothing about a server running old code.
+  banner.classList.toggle('inert', !action);
+  banner.setAttribute('aria-disabled', action ? 'false' : 'true');
+  staleBannerAction = action;
+  banner.hidden = false;
+}
 
 async function checkStaleBuild() {
   if (!BUILD) return;
@@ -3764,19 +3776,31 @@ async function checkStaleBuild() {
   try {
     const response = await fetch('/api/version', { cache: 'no-store' });
     const data = await response.json();
-    const stale = data.version && data.version !== BUILD;
+    const tabStale = data.version && data.version !== BUILD;
+    // The other direction, and the reason this check reports two things: the
+    // server can be running older Python than the files on disk while serving
+    // this very js, so nothing on the page looks out of date.
+    const serverStale = !!(data.server && data.server.stale);
     const banner = byId('staleBanner');
-    banner.hidden = !stale;
-    if (stale) {
-      banner.textContent = 'This tab runs build ' + BUILD + ' but the server is on '
-        + data.version + ' — click to reload';
+    if (tabStale) {
+      showStaleBanner('This tab runs build ' + BUILD + ' but the server is on '
+        + data.version + ' — click to reload', () => location.reload());
+    } else if (serverStale) {
+      showStaleBanner('The server is running code older than the files on disk'
+        + ' — restart it. Reloading this tab will not help.', null);
+    } else {
+      banner.hidden = true;
+      banner.classList.remove('inert');
+      staleBannerAction = null;
     }
   } catch {
     // The server being unreachable is told by every other fetch already.
   }
 }
 
-byId('staleBanner').addEventListener('click', () => location.reload());
+byId('staleBanner').addEventListener('click', () => {
+  if (staleBannerAction) staleBannerAction();
+});
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) checkStaleBuild();
 });

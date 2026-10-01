@@ -956,3 +956,28 @@ turn. Cleared with the database it belongs to.
   looks exactly like the ones on disk, and checks the turn is priced from the
   OpenRouter catalogue rather than left unpriced. It was confirmed red with
   the fallback removed.
+
+### The version answer says which of the two stale builds is stale
+
+- **A stale tab and a stale server look identical and need opposite answers.**
+  `static/` and `/api/version` are both read from disk on every request, so a
+  process that imported yesterday's code serves *today's* `app.js` and reports
+  today's asset hash. The build stamp under the sidebar says current, and the
+  banner that exists to catch a build mismatch stays silent - on a page
+  entirely made of the new build and answering with the old logic.
+- `GET /api/version` now answers the other direction beside the build it would
+  serve: when this process loaded its modules, when the newest Python it runs
+  was last written, and whether the second is later than the first. Python is
+  imported once, and `static/` is deliberately not counted - an edited asset is
+  the one change a reload really does fix, so counting it would report a stale
+  server every time the js changed.
+- The banner has two states now and the new one is not clickable, and does not
+  look it: reloading a tab cannot restart a process. Its text says so, because
+  "restart it" without "not this" is the sentence that sends someone to reload
+  a page that will not change.
+- Three unit tests in `tests/test_app.py` pin the comparison, its direction and
+  the deliberate exclusion of `static/`. A new browser test measures all three
+  states in the page, including a real click on the inert banner - which the
+  value planted on the page immediately before it would not survive if the
+  click had reloaded. Each behaviour was confirmed to fail with its code
+  removed: the comparison, the branch, and the action it must not have.
