@@ -1068,3 +1068,25 @@ turn. Cleared with the database it belongs to.
 - Two route-level tests - one per provider, both transports on OpenRouter -
   type a padded system prompt at `/api/preview`. Removing the strip turns both
   red with the original error, which is the only proof the tests are about it.
+
+### Fixed: the system prompt is locked once a conversation is under way
+
+- The padded-prompt refusal above was one symptom of a larger one. `llm`
+  bakes the message chain on a conversation's first turn
+  (`Conversation._build_full_chain`): the chain is later read from the last
+  response's `prompt.messages` or from `loaded_messages`, and the `system=`
+  argument is read **nowhere** - a system prompt typed from turn 2 on, or
+  into a reopened conversation, is silently dropped. The verify step caught
+  the drop and refused with "the request system prompt does not match the
+  form", which was honest but left the user no way to send at all.
+- The runtime cannot honour the control, so the form no longer offers it:
+  the `system` control's schema carries `locked` wording
+  (`API supported · runtime fixed` - "carried from this conversation's first
+  turn; a later change would be silently ignored"), and the System pill menu
+  greys its input with that wording whenever the open conversation has turns.
+  Whether the conversation has turns is state only the page holds, so the
+  page decides *when*; the reason it locks with is the schema's, like every
+  other refusal. The verify refusal stays as the backstop.
+- A schema test pins the wording, and two browser tests measure the real
+  menu: editable with the cache-prefix hint on a new conversation, disabled
+  with the conversation's own value and the lock reason once it has turns.

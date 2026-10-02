@@ -969,6 +969,20 @@ function isEditable(id) {
   return !!control && control.status === 'Editable';
 }
 
+/* The system prompt stops being an offer once the conversation is under way:
+   llm bakes the chain on the first turn and reads a later system= from
+   nowhere, so from turn 2 on the runtime cannot honour a change. Whether the
+   conversation has turns is state only this page holds; the wording it greys
+   out with is the schema's, never decided here. */
+function systemLocked() {
+  return !!(state.turns && state.turns.length);
+}
+
+function systemLock() {
+  const control = controlOf('system');
+  return (control && control.locked) || null;
+}
+
 /* Why a control cannot be used, as the menu's own note. */
 function refusalNote(id) {
   const control = controlOf(id);
@@ -1178,13 +1192,17 @@ const PILL_DEFS = [
     value: () => byId('system').value.trim() ? 'On' : 'Off',
     menu: (menu) => {
       menuHead(menu, 'System prompt');
+      const lock = systemLocked() ? systemLock() : null;
       const field = document.createElement('div');
       field.className = 'field';
       field.innerHTML = '<input type="text" placeholder="empty = Off" value="'
-        + esc(byId('system').value) + '">'
-        + '<div class="hint">part of the cache prefix - changing it invalidates '
-        + 'the cached prefix</div>';
+        + esc(byId('system').value) + '"' + (lock ? ' disabled' : '') + '>'
+        + '<div class="hint">' + esc(lock
+          ? lock.status + ' · ' + lock.note
+          : 'part of the cache prefix - changing it invalidates '
+            + 'the cached prefix') + '</div>';
       menu.appendChild(field);
+      if (lock) return;   // locked: nothing in this menu may change the value
       const input = field.querySelector('input');
       input.addEventListener('change', () => {
         closePillMenu();

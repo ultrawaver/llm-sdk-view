@@ -431,6 +431,21 @@ def test_form_endpoint_rejects_an_unknown_model():
     assert "error" in response.json()
 
 
+def test_the_system_control_carries_the_wording_it_locks_with():
+    """A conversation under way cannot honour a system change: llm bakes the
+    chain on the first turn and reads a later system= from nowhere, so from
+    turn 2 on the control must grey out instead of offering a value that
+    would be dropped. Whether the conversation has turns is state the schema
+    route never sees - the page decides when - but the reason it locks with
+    is the schema's word, like every other refusal."""
+    data = TestClient(app).get("/api/form").json()
+    locked = data["controls"]["system"]["locked"]
+
+    assert locked["status"] == "API supported · runtime fixed"
+    assert "first turn" in locked["note"]
+    assert "ignored" in locked["note"]
+
+
 def test_chat_endpoint_rejects_an_impossible_request(monkeypatch, fake_provider):
     """A form value the plugin cannot honour is a 400, not a silent change."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-tests")

@@ -288,7 +288,23 @@ def form_schema(model_id: str) -> dict:
                     else "no output ceiling is known for this model"
                 ),
             },
-            "system": {"status": EDITABLE, "note": "omitted from the request when empty"},
+            "system": {
+                "status": EDITABLE,
+                "note": "omitted from the request when empty",
+                # What the schema cannot know is *when* this applies - whether
+                # the open conversation already has turns is the page's state.
+                # llm bakes the chain on a conversation's first turn and reads
+                # a later system= from nowhere, so from turn 2 on the runtime
+                # cannot honour a change: the control greys out with this
+                # wording rather than offering a value that would be dropped.
+                "locked": {
+                    "status": RUNTIME_FIXED,
+                    "note": (
+                        "carried from this conversation's first turn; "
+                        "a later change would be silently ignored"
+                    ),
+                },
+            },
         },
         "context": context_state({}, capabilities).as_dict(),
         "capabilities": capabilities.as_dict(),

@@ -323,6 +323,58 @@ def test_matching_the_last_turn_keeps_the_warning_away(page):
     ) is True
 
 
+def test_a_new_conversation_still_offers_the_system_prompt(page):
+    """No turns yet: the runtime honours system=, so the menu stays open for
+    editing and keeps the cache-prefix wording it always had."""
+    outcome = page.evaluate(
+        """async () => {
+            await loadForm();
+            state.turns = [];
+            const menu = document.createElement('div');
+            PILL_DEFS.find((p) => p.id === 'system').menu(menu);
+            const input = menu.querySelector('input');
+            return {
+                disabled: input.disabled,
+                hint: menu.querySelector('.hint').textContent,
+            };
+        }"""
+    )
+    assert outcome["disabled"] is False
+    assert "cache prefix" in outcome["hint"]
+
+
+def test_a_conversation_under_way_locks_the_system_prompt(page):
+    """From turn 2 on, llm carries the first turn's system forward and reads
+    a later system= from nowhere - the request the user thought they changed
+    is not the request that gets built. So the menu shows the conversation's
+    own value, disabled, with the reason the schema words; the verify refusal
+    that used to be the only answer is the backstop, not the UX."""
+    outcome = page.evaluate(
+        """async () => {
+            await loadForm();
+            const stored = Object.assign(currentFormOptions(), {
+                system: 'the system prompt this conversation started with',
+            });
+            state.turns = [{ options: stored }];
+            applyStoredOptions(stored);
+            const menu = document.createElement('div');
+            PILL_DEFS.find((p) => p.id === 'system').menu(menu);
+            const input = menu.querySelector('input');
+            return {
+                disabled: input.disabled,
+                value: input.value,
+                hint: menu.querySelector('.hint').textContent,
+            };
+        }"""
+    )
+    assert outcome["disabled"] is True, (
+        "a change the runtime would silently ignore must not be offerable"
+    )
+    assert outcome["value"] == "the system prompt this conversation started with"
+    assert "first turn" in outcome["hint"]
+    assert "ignored" in outcome["hint"]
+
+
 def test_the_composer_holds_more_than_three_lines(page):
     """Three lines used to be enough to start scrolling."""
     height = page.evaluate(
