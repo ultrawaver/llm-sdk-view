@@ -384,6 +384,39 @@ def test_anthropics_counter_is_never_asked_about_an_openrouter_turn(
     assert asked == []
 
 
+def test_a_system_prompt_typed_with_padding_is_not_refused(
+    client, openrouter_registry, fake_openrouter
+):
+    """The same rule on either transport, and they spell it differently.
+
+    llm strips the system prompt before the API sees it, so the Responses path
+    carries it stripped as ``instructions`` and Chat Completions as a stripped
+    system message. An option that kept the typed text matched neither, and the
+    turn was refused over whitespace.
+    """
+    (model_id,) = openrouter_registry("openai/gpt-5.4")
+
+    for transport in (False, True):
+        body = client.post(
+            "/api/preview",
+            json={
+                "text": "hello",
+                "model": model_id,
+                "chat_completions": transport,
+                "system": "  be brief \n",
+            },
+        ).json()
+
+        assert "error" not in body, body
+        if transport:
+            assert body["kwargs"]["messages"][0] == {
+                "role": "system",
+                "content": "be brief",
+            }
+        else:
+            assert body["kwargs"]["instructions"] == "be brief"
+
+
 def test_the_context_figure_says_it_is_an_estimate_when_nobody_counted(
     client, openrouter_registry, fake_openrouter
 ):

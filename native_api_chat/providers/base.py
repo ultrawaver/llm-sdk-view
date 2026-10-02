@@ -55,6 +55,25 @@ def first_int(source: dict, *fields: str) -> int | None:
     return None
 
 
+def system_as_sent(value: Any) -> str:
+    """The system prompt as the request carries it, not as it was typed.
+
+    ``llm`` assembles the system prompt in ``_combine_system()``, which strips
+    every fragment and keeps only those that are left - so a prompt typed with
+    a trailing newline reaches the API without one, and a prompt of nothing but
+    whitespace reaches it as no system prompt at all. An option that kept the
+    typed text is then a value no request can contain: the check that compares
+    the two refuses the turn over a difference no reader can see, which is how
+    "You are helpful\\n" came back as *the request system prompt does not match
+    the form*.
+
+    Normalising here makes ``options.system`` the string that is really sent -
+    what the pane prints, what the request is checked against, what a stored
+    turn records, and what next turn's "system changed" is compared with.
+    """
+    return str(value or "").strip()
+
+
 @dataclass(frozen=True)
 class Transport:
     """One SDK call, in the pieces needed to print it back verbatim.

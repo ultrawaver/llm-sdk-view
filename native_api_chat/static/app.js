@@ -2112,11 +2112,18 @@ function markSelected() {
    default applied, never that a value was lost, so the card says so once in
    its footer instead of repeating it per row. */
 
+/* The system prompt as it is sent, not as it was typed: llm strips it before
+   it reaches the API, so the form reads it trimmed. Without this, a prompt
+   typed with a trailing newline is stored stripped and then looks *changed*
+   on the next turn - and system is a cache-prefix field, so the page would
+   blame the cache for a difference that costs nothing. */
+const formSystem = () => byId('system').value.trim();
+
 function currentFormOptions() {
   return {
     model: byId('model').value,
     max_tokens: Number(byId('maxTokens').value),
-    system: byId('system').value,
+    system: formSystem(),
     ...providerFields()
   };
 }
@@ -2347,7 +2354,7 @@ function payload(text) {
     new_conversation: state.fresh === true,
     model: byId('model').value,
     max_tokens: Number(byId('maxTokens').value),
-    system: byId('system').value,
+    system: formSystem(),
     ...providerFields()
   };
 }

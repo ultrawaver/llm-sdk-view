@@ -38,7 +38,7 @@ from ..turn import (
     estimate_text,
     option_list,
 )
-from .base import Transport, first_int
+from .base import Transport, first_int, system_as_sent
 
 MODEL_PREFIX = "openrouter/"
 
@@ -795,7 +795,7 @@ class OpenRouterProvider:
         return OpenRouterOptions(
             model=payload["model"],
             max_tokens=int(payload.get("max_tokens", 16384)),
-            system=str(payload.get("system") or ""),
+            system=system_as_sent(payload.get("system")),
             chat_completions=bool(payload.get("chat_completions", False)),
             reasoning_effort=str(payload.get("reasoning_effort") or OMITTED),
             reasoning_max_tokens=_optional_int(payload.get("reasoning_max_tokens")),

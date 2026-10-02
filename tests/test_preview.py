@@ -63,6 +63,23 @@ def test_the_preview_is_the_request_send_would_have_built(
     assert transports == ["stream"]
 
 
+def test_a_system_prompt_typed_with_padding_is_not_refused(client, fake_provider):
+    """llm strips the system prompt before the API sees it.
+
+    ``_combine_system()`` strips every fragment, so a prompt typed with a
+    trailing newline reaches the API without one. An option that kept the
+    typed text was then a value no request could contain, and the check that
+    compares the two refused the turn - "the request system prompt does not
+    match the form" - over a difference no reader could see.
+    """
+    data = client.post(
+        "/api/preview", json=payload(system="  Answer in one line \n")
+    ).json()
+
+    assert "error" not in data
+    assert data["kwargs"]["system"] == "Answer in one line"
+
+
 def test_a_preview_never_records_a_turn(client, fake_provider, key):
     client.post("/api/preview", json=payload(text="one"))
     client.post("/api/preview", json=payload(text="two"))

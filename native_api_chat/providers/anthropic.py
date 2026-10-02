@@ -40,7 +40,7 @@ from ..turn import (
     estimate_text,
     option_list,
 )
-from .base import Transport, first_int
+from .base import Transport, first_int, system_as_sent
 
 # Explicit, versioned tool types only. "latest" aliases are never sent.
 WEB_SEARCH_TYPES = ("web_search_20260318", "web_search_20250305")
@@ -602,7 +602,7 @@ class AnthropicProvider:
         return AnthropicOptions(
             model=payload.get("model", defaults.model),
             max_tokens=int(payload.get("max_tokens", defaults.max_tokens)),
-            system=str(payload.get("system", defaults.system) or ""),
+            system=system_as_sent(payload.get("system", defaults.system)),
             # None means "the official default for this model"; anything else
             # is validated against the model's real thinking capability.
             thinking=str(thinking) if thinking is not None else None,

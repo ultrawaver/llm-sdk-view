@@ -1044,3 +1044,27 @@ turn. Cleared with the database it belongs to.
   is how it came to declare an 8192 completion ceiling under a form default of
   16384, and the send was then refused, correctly, for a reason the test was
   not about.
+
+### Fixed: a system prompt typed with padding was refused as a mismatch
+
+- `llm` assembles the system prompt in `_combine_system()`, which strips every
+  fragment and keeps only those that are left. A prompt typed with a trailing
+  newline therefore reaches the API without one - but `options.system` kept
+  what was typed, and the check that compares the request against the form
+  then refused the turn: **"the request system prompt does not match the
+  form"**, for a turn whose only difference was whitespace nobody can see. It
+  was neither an OpenRouter bug nor a free-model bug: an Anthropic model
+  refused the same prompt the same way.
+- `providers/base.py` gains `system_as_sent()`, used by both providers where
+  the payload is read, so `options.system` is the string the request really
+  carries - what the right pane prints, what the request is checked against,
+  and what a stored turn records. One helper rather than two, because a value
+  that is normalised on one provider only would put the two forms out of step.
+- `app.js` reads the field trimmed too, in both places that build "what the
+  form is asking for". Without it a stored turn would hold the stripped prompt
+  while the form still held the padded one, and `system` is a cache-prefix
+  field: the page would have printed "settings changed" and blamed the prompt
+  cache for a difference that cannot cost a hit.
+- Two route-level tests - one per provider, both transports on OpenRouter -
+  type a padded system prompt at `/api/preview`. Removing the strip turns both
+  red with the original error, which is the only proof the tests are about it.
