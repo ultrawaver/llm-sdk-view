@@ -981,3 +981,66 @@ turn. Cleared with the database it belongs to.
   value planted on the page immediately before it would not survive if the
   click had reloaded. Each behaviour was confirmed to fail with its code
   removed: the comparison, the branch, and the action it must not have.
+
+### A receipt reads its counters from the provider, and never prints a rate nobody published
+
+- **The cache figures were being read from a copy llm had already thrown the
+  zeros out of.** `llm` runs every plugin's usage through `simplify_usage_dict`,
+  which deletes every key valued `0` and every dict that flattens to nothing.
+  An OpenRouter turn that reported `cached_tokens: 0` therefore arrived here
+  with its whole `prompt_tokens_details` gone and was recorded as a turn whose
+  cache read was never measured. Those are different answers - only a reported
+  zero may be shown as a 0% hit rate - and the wrong one looks exactly like an
+  honest gap, so nothing downstream could catch it.
+- `usage_document()` replaces the private `_usage()`: the provider's own usage
+  object, kept whole, and the document every counter is now read out of.
+  `usage_from` takes that document rather than llm's flattened details, and
+  each provider reads its own spelling of a counter through a shared
+  `first_int` helper, which tries every name before it may say "not reported".
+- **`ResponseView.counts` is derived rather than stored.** A turn written by the
+  old reader carries an OpenRouter cache read of "unreported" in a stored
+  `counts` field, beside a document that says `0` - and a stored figure cannot
+  be repaired by a later reader, however much the reader improves. The field is
+  gone from the dataclass and from `from_dict`, so a bad stored reading can no
+  longer be read back at all: a stored turn is re-read from its own document on
+  every render, the way `raw` and `cost` already were. A test feeds a stored
+  record the old wrong reading and gets the right one back, with no migration
+  and nothing rewritten on disk.
+- **OpenRouter does report a cache write**, under `input_tokens_details` on
+  Responses and `prompt_tokens_details` on Chat Completions - a field sent only
+  for models with a cache-write price. The receipt had no write row, and the
+  raw count was not even read, so the total could not explain an input it had
+  no line for.
+- The receipt now carries **a write row on every turn** and a **search row**
+  wherever the catalogue prices one. The write is a slice of the prompt like
+  the read, so it leaves the uncached figure and is charged at the write rate
+  rather than billed twice.
+- The sentence **"OpenRouter reports no count for them" is gone**, and it was
+  false about both counters it described: the write is reported as above, and
+  the search arrives in the same `server_tool_use` count the shared reader
+  already hoists. A note may say a count did not arrive; it may not say the
+  provider has none to send.
+- A write count arrives with **no TTL** while the catalogue may price two and
+  does - differently - for every row carrying both. So a write is counted, left
+  unpriced, and the receipt says which of the two prices it declined to pick.
+- **A rate the catalogue never published printed `$0.00 / MTok`**, which reads
+  as a published price of nothing. Most rows carry no cache-read rate at all,
+  and the catalogue said nothing rather than zero. `_line()` now accepts a
+  missing rate and the row prints "no published rate".
+- The context meter adds up the counts that occupy context, and which those are
+  is the sending provider's arithmetic rather than a constant: Anthropic counts
+  the uncached input beside its cache counters, OpenRouter counts a prompt that
+  already contains them. `Provider.context_counts` names them, so the two are
+  no longer summed as one - which had been adding an OpenRouter prompt to its
+  own cached slice and reporting the conversation as fuller than it was.
+- `app.js` gains `cache_write` in its colour and stack tables: a line key the
+  colour table does not name renders as no colour at all, and the browser test
+  measures the swatch's computed background rather than trusting the class.
+- Test harness: the scripted OpenRouter reply now reports the model the request
+  named instead of a constant `openai/gpt-5.4`. The constant was invisible
+  while every fixture registered that one model, and it silently priced any
+  other model's turn from a model it was never sent. The unpriced-model fixture
+  is derived from the shared catalogue entry rather than hand-copied - the copy
+  is how it came to declare an 8192 completion ceiling under a form default of
+  16384, and the send was then refused, correctly, for a reason the test was
+  not about.

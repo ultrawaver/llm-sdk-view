@@ -38,7 +38,7 @@ from ..turn import (
     estimate_text,
     option_list,
 )
-from .base import Transport
+from .base import Transport, first_int
 
 MODEL_PREFIX = "openrouter/"
 
@@ -322,18 +322,51 @@ def _part_texts(parts: Any) -> str:
 CACHED_TOKEN_PARENTS = ("input_tokens_details", "prompt_tokens_details")
 
 
-def _cached_tokens(details: dict) -> int | None:
-    """The cached input tokens this turn reused, or None if none was reported.
+def _cached_tokens(document: dict) -> int | None:
+    """The tokens this turn read from the cache, or None if none was reported.
 
-    Zero is a real answer and is reported as zero: ``llm`` removes zero-valued
-    keys from the details, so a parent that is present with no ``cached_tokens``
-    inside it means the provider reported no cache hits, while a parent that is
-    absent means it reported nothing at all.
+    The field is only sent when the model has caching to speak of, so an
+    absent one means "not reported" and a present one means what it says -
+    including 0, which is the answer most turns give and is not the same as
+    silence.
+
+    Read off the document the provider sent rather than off llm's flattened
+    ``token_details``. ``simplify_usage_dict`` deletes a key whose value is 0,
+    so a Chat Completions turn that reused nothing arrived here with its
+    whole ``prompt_tokens_details`` removed, and was reported as a turn whose
+    cache read was never measured - a wrong answer that looks exactly like an
+    honest gap.
+    """
+    return _detail_count(document, "cached_tokens")
+
+
+def _cache_write_tokens(document: dict) -> int | None:
+    """The tokens this turn wrote to the cache, or None if none was reported.
+
+    OpenRouter documents one field for this on both transports - under
+    ``input_tokens_details`` on Responses and ``prompt_tokens_details`` on
+    Chat Completions - and describes it as returned only for models with
+    explicit caching and a cache-write price. So its absence is "not
+    reported", and only a number may be counted.
+    """
+    return _detail_count(document, "cache_write_tokens")
+
+
+def _detail_count(document: dict, field: str) -> int | None:
+    """One cache counter, from whichever transport's parent carries it.
+
+    The first parent that really carries the field wins - not the first one
+    that merely exists. Both are tried because the transport is chosen per
+    request, and a turn's counters must not depend on this project having
+    guessed which one it was.
     """
     for parent in CACHED_TOKEN_PARENTS:
-        nested = details.get(parent)
-        if isinstance(nested, dict):
-            return nested.get("cached_tokens") or 0
+        nested = document.get(parent)
+        if not isinstance(nested, dict):
+            continue
+        value = first_int(nested, field)
+        if value is not None:
+            return value
     return None
 
 
@@ -672,6 +705,11 @@ class OpenRouterProvider:
     # field count_tokens wants, so the call would be well-formed enough to
     # send this conversation to a provider that has nothing to do with it.
     counts_tokens = False
+    # The counts that occupy context. ``input`` is the whole prompt here -
+    # OpenRouter reports the cached and written tokens as slices of it - so
+    # the cache counters are already inside it and adding them would count
+    # the same tokens twice.
+    context_counts = ("input", "output")
 
     def owns(self, model_id: str) -> bool:
         return model_id.startswith(MODEL_PREFIX)
@@ -1173,29 +1211,32 @@ class OpenRouterProvider:
         total += estimate_text(json.dumps(kwargs.get("tools", [])))
         return total
 
-    def usage_from(self, usage: Any, details: dict) -> dict:
+    def usage_from(self, document: dict) -> dict:
         """OpenRouter's own counts, under the names this app reports.
 
-        The cache read is nested, and under a different parent on each path:
-        ``input_tokens_details.cached_tokens`` on Responses and
-        ``prompt_tokens_details.cached_tokens`` on Chat Completions. Reading
-        it off the top level - which is where Anthropic's counters sit - finds
-        nothing and reports every turn as a cache miss.
+        The cache counters are nested, and under a different parent on each
+        transport: ``input_tokens_details`` on Responses and
+        ``prompt_tokens_details`` on Chat Completions. Reading them off the
+        top level - which is where Anthropic's counters sit - finds nothing
+        and reports every turn as a cache miss, which is a number, so nothing
+        downstream can tell that it is a wrong one.
 
-        ``llm`` strips zeros out of the details, so the parent's presence is
-        what separates "nothing was cached" from "nothing was reported". Both
-        are honest answers and they are not the same one: only the first can
-        be shown as a 0% hit rate.
+        Both cache counters are read, the write as well as the read. This
+        provider does report a cache write - under a field that is only sent
+        when the model has a cache-write price - and treating it as something
+        OpenRouter never says left a receipt that priced an input which could
+        only be explained by a line it did not have.
 
-        There is no cache *write* count on either path. OpenRouter prices one
-        for some models but does not report one here, so it stays unknown
-        rather than being inferred from the read.
+        ``input`` is the **whole prompt**, the cached and written parts
+        included, which is why :attr:`context_counts` is two names here and
+        four on Anthropic: adding the cache counters to a prompt that already
+        contains them would count the same tokens twice in the meter.
         """
         return {
-            "input": getattr(usage, "input", None),
-            "output": getattr(usage, "output", None),
-            "cache_creation": None,
-            "cache_read": _cached_tokens(details),
+            "input": first_int(document, "input_tokens", "prompt_tokens"),
+            "output": first_int(document, "output_tokens", "completion_tokens"),
+            "cache_creation": _cache_write_tokens(document),
+            "cache_read": _cached_tokens(document),
         }
 
     # ---- what the model can do -------------------------------------------

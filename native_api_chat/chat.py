@@ -41,7 +41,7 @@ from .providers.anthropic import (
     dynamic_filtering_state,
     effective_allowed_callers,
 )
-from .records import TurnRecord, build_response_view
+from .records import TurnRecord, build_response_view, usage_document
 from .turn import (
     EDITABLE,
     FALLBACK_DATA,
@@ -155,26 +155,27 @@ def context_state(
     Which provider's request shape this is comes from the capability record's
     own model id rather than from an argument, so a caller cannot hand the
     Anthropic estimator an OpenRouter request and be told a number for it.
+    The same id decides how its counters are added up, and that is not
+    pedantry: Anthropic counts the uncached input beside its cache counters,
+    while OpenRouter counts a prompt that already contains them, so one sum
+    for both would add a cached slice to itself on one provider's turns and
+    report a conversation as fuller than it is.
     """
+    provider = provider_for(capabilities.id)
     limit = capabilities.context_window
     if counted is not None:
         tokens = counted
         source = COUNTED
     elif usage is not None:
-        # Total input = uncached + cache write + cache read (the API's own
-        # accounting); the cached prefix occupies context exactly like fresh
-        # tokens do. The reply counts too: it is part of the next request.
-        tokens = (
-            (usage.get("input") or 0)
-            + (usage.get("cache_creation") or 0)
-            + (usage.get("cache_read") or 0)
-            + (usage.get("output") or 0)
-        )
+        # The counts that occupy context, in the sending provider's own
+        # arithmetic, plus the reply - which becomes part of the next
+        # request. Which those are is the provider's list to name.
+        tokens = sum(usage.get(name) or 0 for name in provider.context_counts)
         added = estimate_text(draft)
         tokens += added
         source = USAGE_WITH_ESTIMATE if added else USAGE
     else:
-        tokens = provider_for(capabilities.id).estimate_input_tokens(kwargs)
+        tokens = provider.estimate_input_tokens(kwargs)
         source = ESTIMATED if tokens is not None else UNKNOWN
 
     if limit is None or tokens is None:
@@ -540,14 +541,15 @@ class ChatSession:
         except llm.NeedsKeyException as ex:
             raise MissingKeyError(str(ex)) from ex
 
-    def _record_usage(self, response: Any) -> None:
+    def _record_usage(self, document: dict) -> None:
         """Prefer the provider's own token counts once they exist.
 
-        Which details hold the cache counters is the provider's business:
-        ``llm`` reports uncached input and output, and each plugin keeps the
-        rest under its own names.
+        Which document holds the cache counters, and what they are called
+        there, is the provider's business: ``llm`` flattens every plugin's
+        usage into one shape and drops the zeros on the way, so the reading
+        is taken off what the provider really sent.
 
-        A usage object that arrives with no counts in it is not kept, because
+        A usage that arrives with no counts in it is not kept, because
         downstream "there is a usage" means "the provider measured this". It
         happens for real: a reply truncated at the token ceiling ends the
         Responses stream with ``response.incomplete``, which ``llm`` does not
@@ -556,14 +558,7 @@ class ChatSession:
         provider's own figure - the one kind of wrong answer this meter must
         never give, since being measured is the whole reason it is trusted.
         """
-        try:
-            usage = response.usage()
-        except Exception:  # noqa: BLE001 - an unknown usage shape is not fatal
-            return
-        details = getattr(response, "token_details", None)
-        if not isinstance(details, dict):
-            details = {}
-        reported = self.provider.usage_from(usage, details)
+        reported = self.provider.usage_from(document)
         self._usage = reported if _has_counts(reported) else None
 
     def stream_turn(self, text: str) -> Iterator[dict]:
@@ -598,7 +593,7 @@ class ChatSession:
                 # Signature and redacted markers arrive as empty reasoning
                 # chunks; only text is worth an event.
                 yield {"type": "reasoning", "text": event.chunk}
-        self._record_usage(prepared.response)
+        self._record_usage(usage_document(prepared.response))
         # Only now does a turn exist: before the stream ends there is no
         # complete Message, so there is nothing to look at or to store.
         self.last_response = prepared.response
@@ -630,7 +625,6 @@ class ChatSession:
                 prepared.response,
                 ttft_ms=ttft_ms,
                 provider=self.provider,
-                counts=self._usage,
             ),
             context=self.context().as_dict(),
         )

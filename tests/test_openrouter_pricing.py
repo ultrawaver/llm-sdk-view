@@ -1,14 +1,19 @@
 """An OpenRouter turn's cost, from OpenRouter's own catalogue prices.
 
 The prices themselves are pinned in ``test_openrouter_rates``. What is pinned
-here is the arithmetic over them, and the three places OpenRouter's counters
+here is the arithmetic over them, and the four places OpenRouter's counters
 differ from Anthropic's - each of which turns a plausible-looking number into
 a wrong one if it is assumed away:
 
-- ``input_tokens`` is the **whole prompt**, so the cached tokens are a slice
-  of it and not a second count on top;
-- there is **no cache-write count** on either transport;
-- **no search count** reaches this app either.
+- ``input_tokens`` is the **whole prompt**, so the cached and written tokens
+  are slices of it and not a second count on top;
+- a **cache write is reported**, under a field sent only for models that
+  price one, so a turn that wrote says so and a turn that did not is not
+  read as a turn that wrote nothing;
+- a **search is reported** too, in the same ``server_tool_use`` count
+  Anthropic uses;
+- the write count **carries no TTL**, so a model that prices two of them
+  differently cannot have its write charged at either.
 """
 
 from native_api_chat import openrouter_api, pricing, rates_openrouter
@@ -95,25 +100,164 @@ def test_a_broken_cache_counter_cannot_inflate_the_bill(openrouter_catalogue):
     assert cost["input_total_tokens"] == 100
 
 
-def test_no_cache_write_is_priced_because_none_is_reported(
+def test_a_reported_cache_write_is_charged_and_not_counted_twice(
     openrouter_catalogue,
 ):
-    """OpenRouter prices a write for some models and reports one for none.
+    """OpenRouter does report a write, and it is a slice of the prompt too.
 
-    A write line at some assumed quantity would be an invention, so the line
-    is absent - and the receipt says the row priced a write, so its absence is
-    explained rather than left to look like a free one.
+    So the written tokens leave the uncached figure and are charged at the
+    write rate. Dropping the line priced them at the input rate, which for a
+    write is the wrong one by however much the catalogue says a write costs;
+    leaving them in the uncached figure as well would bill them twice.
+    """
+    model = install(openrouter_catalogue, "vendor/writes",
+                    input_cache_write="0.000005")
+
+    cost = cost_breakdown(
+        model,
+        {"input_tokens": 1200, "output_tokens": 900},
+        {"cache_read": 0, "cache_creation": 1000},
+    )
+
+    assert line(cost, "cache_write")["quantity"] == 1000
+    assert line(cost, "cache_write")["rate"] == 5.0
+    assert line(cost, "cache_write")["amount"] == 0.005
+    assert line(cost, "cache_write")["reported"] is True
+    assert line(cost, "uncached_input")["quantity"] == 200
+    assert cost["total"] == 0.019
+    # The prompt is still the whole input: a write adds nothing to it.
+    assert cost["input_total_tokens"] == 1200
+    # A write is dearer than reading the same tokens as fresh input, so the
+    # comparison against an uncached turn is a cost rather than a saving.
+    assert cost["savings"] < 0
+
+
+def test_a_write_count_with_two_ttl_rates_is_counted_but_not_charged(
+    openrouter_catalogue,
+):
+    """OpenRouter reports one write count and states no TTL for it.
+
+    The catalogue may price two, and does - differently - for every row that
+    carries both, so there is no rate the count belongs to. Charging it at
+    either would be picking a price the API never named.
+    """
+    model = install(openrouter_catalogue, "vendor/two-ttls",
+                    input_cache_write="0.0000025",
+                    input_cache_write_1h="0.000004")
+
+    cost = cost_breakdown(
+        model,
+        {"input_tokens": 1200, "output_tokens": 900},
+        {"cache_read": 0, "cache_creation": 1000},
+    )
+
+    write = line(cost, "cache_write")
+    assert write["quantity"] == 1000
+    assert write["reported"] is True
+    assert write["rate"] is None
+    assert write["amount"] == 0
+    assert any("no TTL" in note for note in cost["notes"]), cost["notes"]
+    # Counted, so still out of the uncached figure - it did happen.
+    assert line(cost, "uncached_input")["quantity"] == 200
+
+
+def test_an_unreported_write_is_not_read_as_a_write_of_nothing(
+    openrouter_catalogue,
+):
+    """The field is sent only for models with a cache-write price.
+
+    Its absence is "not reported": the row says so rather than printing a
+    confident zero, and the receipt says which way the estimate leans - any
+    written tokens are in the uncached figure, priced at the input rate.
     """
     model = install(openrouter_catalogue)
 
     cost = cost_breakdown(model, {"input_tokens": 1200, "output_tokens": 900},
-                          {"cache_read": 1024})
+                          {"cache_read": 0})
 
-    assert line(cost, "cache_write_5m") is None
-    assert line(cost, "cache_write_1h") is None
-    assert line(cost, "web_search") is None
-    assert any("cache writes" in note and "searches" in note
-               for note in cost["notes"]), cost["notes"]
+    write = line(cost, "cache_write")
+    assert write["reported"] is False
+    assert write["quantity"] == 0
+    assert write["note"] == "unreported"
+    assert any("did not report a cache write" in note for note in cost["notes"])
+
+
+def test_a_write_row_exists_on_every_receipt(openrouter_catalogue):
+    """The row the receipt was missing.
+
+    Cache writes read as an absent line, and an absent line reads as a free
+    one - which is how a receipt could price an input whose explanation it
+    did not have.
+    """
+    plain = install(openrouter_catalogue, "vendor/plain",
+                    input_cache_write=None, web_search=None)
+
+    for counts in ({}, {"cache_read": 0}, {"cache_read": 512}):
+        cost = cost_breakdown(
+            plain, {"input_tokens": 1200, "output_tokens": 900}, counts
+        )
+        assert line(cost, "cache_write") is not None, counts
+
+
+def test_no_receipt_claims_openrouter_reports_no_count(openrouter_catalogue):
+    """The sentence that shipped was about the API and was not true.
+
+    "OpenRouter reports no count for them" was printed beside cache writes
+    and searches. Both are reported - the write under a field sent only for
+    models with a write price, the search in the same ``server_tool_use``
+    count Anthropic uses. A note may say a count did not arrive; it may not
+    say the provider has none to send.
+    """
+    model = install(openrouter_catalogue)
+
+    cost = cost_breakdown(model, {"input_tokens": 1200, "output_tokens": 900}, {})
+
+    assert not any("reports no count" in note for note in cost["notes"])
+    assert any("did not report a cache write" in note for note in cost["notes"])
+    assert any("no search count" in note for note in cost["notes"])
+
+
+def test_a_search_is_charged_where_the_catalogue_prices_one(
+    openrouter_catalogue,
+):
+    """OpenRouter counts a search in the count the shared reader already
+    hoists, and the catalogue prices one per request rather than per token."""
+    model = install(openrouter_catalogue)
+
+    cost = cost_breakdown(
+        model,
+        {"input_tokens": 1200, "output_tokens": 900, "web_search_requests": 2},
+        {"cache_read": 0, "cache_creation": 0},
+    )
+
+    search = line(cost, "web_search")
+    assert search["quantity"] == 2
+    assert search["rate"] == 0.01
+    assert search["amount"] == 0.02
+    assert search["group"] == "tools"
+    assert not any("no search count" in note for note in cost["notes"])
+
+
+def test_a_rate_the_catalogue_never_published_is_not_printed_as_zero(
+    openrouter_catalogue,
+):
+    """A price of nothing and no price at all are different claims.
+
+    Most rows carry no cache-read rate. Printing ``$0.00 / MTok`` beside one
+    of them tells the reader the model charges nothing for a cache read, and
+    the catalogue never said that - it said nothing.
+    """
+    model = install(openrouter_catalogue, "vendor/no-read-rate",
+                    input_cache_read=None)
+
+    cost = cost_breakdown(model, {"input_tokens": 1200, "output_tokens": 900},
+                          {"cache_read": 0})
+
+    read = line(cost, "cache_read")
+    assert read["quantity"] == 0
+    assert read["rate"] is None
+    assert read["rate_label"] == pricing.NO_RATE
+    assert "$0.00" not in read["rate_label"]
 
 
 def test_a_model_that_prices_neither_gets_no_note_about_either(

@@ -178,8 +178,12 @@ def test_the_summary_line_reads_the_cache_from_the_provider_that_sent_it(session
 
 
 def test_a_cache_write_is_unknown_rather_than_inferred(session):
-    """OpenRouter prices a cache write for some models and reports none here.
-    Deriving one from the read would invent the more expensive half."""
+    """A turn that reported only a read did not report a write.
+
+    Deriving one from the read would invent the more expensive half, so the
+    absence is carried as an absence - the field is only sent for models with
+    a cache-write price, and this turn did not send one.
+    """
     chat = session(
         usage={
             "input_tokens": 1200,
@@ -190,6 +194,95 @@ def test_a_cache_write_is_unknown_rather_than_inferred(session):
     chat.run_turn("hello")
 
     assert chat.baseline_usage["cache_creation"] is None
+
+
+def test_a_reported_cache_write_reaches_the_record(session):
+    """The counter the app was throwing away.
+
+    OpenRouter sends it under the same parent as the read, and it is the one
+    that explains a prompt whose input rate alone does not account for the
+    bill.
+    """
+    chat = session(
+        usage={
+            "input_tokens": 1200,
+            "output_tokens": 8,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 900},
+        }
+    )
+    chat.run_turn("hello")
+
+    assert chat.baseline_usage == {
+        "input": 1200,
+        "output": 8,
+        "cache_creation": 900,
+        "cache_read": 0,
+    }
+
+
+def test_a_chat_completions_turn_keeps_the_counters_it_reported(session):
+    """llm flattens the usage, and drops the zeros on the way.
+
+    ``simplify_usage_dict`` deletes every key valued 0 and every dict that
+    flattens to nothing, so a Chat Completions turn that reported
+    ``cached_tokens: 0`` inside ``prompt_tokens_details`` arrived with that
+    whole parent gone - and was recorded as a turn whose cache read was never
+    measured. The two are not the same answer: only a reported zero may be
+    shown as a hit rate of 0%.
+    """
+    chat = session(
+        chat_completions=True,
+        usage={
+            "prompt_tokens": 1200,
+            "completion_tokens": 8,
+            "total_tokens": 1208,
+            "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "cache_write_tokens": 900,
+            },
+        },
+    )
+    chat.run_turn("hello")
+
+    assert chat.baseline_usage == {
+        "input": 1200,
+        "output": 8,
+        "cache_creation": 900,
+        "cache_read": 0,
+    }
+    # And the document is still on the record, whole: it is what the Response
+    # pane prints and what the reading above was taken off.
+    document = chat.last_response.response_json["usage"]
+    assert document["prompt_tokens_details"] == {
+        "cached_tokens": 0,
+        "cache_write_tokens": 900,
+    }
+    # llm's flattened copy of the same parent kept the 900 and lost the 0 -
+    # which is the whole defect, in one line: the counter that says "nothing
+    # was cached" is the one that gets deleted.
+    flattened = chat.last_response.token_details["prompt_tokens_details"]
+    assert flattened == {"cache_write_tokens": 900}
+
+
+def test_a_cached_slice_is_not_counted_twice_by_the_meter(session):
+    """OpenRouter's prompt already contains its cached tokens.
+
+    Anthropic counts the uncached input beside its cache counters, so the
+    meter adds all four there. Doing that to OpenRouter's counters adds the
+    cached tokens to themselves, and reports a conversation as fuller than it
+    is - the same mistake the receipt refuses to make.
+    """
+    chat = session(
+        usage={
+            "input_tokens": 1200,
+            "output_tokens": 8,
+            "input_tokens_details": {"cached_tokens": 1024},
+        }
+    )
+    chat.run_turn("hello")
+
+    assert chat.baseline_usage["cache_read"] == 1024
+    assert chat.context().as_dict()["tokens"] == 1208
 
 
 def test_a_truncated_reply_reports_no_figure_rather_than_zero(session):

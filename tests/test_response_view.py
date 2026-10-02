@@ -351,6 +351,73 @@ def test_raw_is_none_when_there_is_no_message():
     assert _view(None, {}).raw is None
 
 
+# --- the counters are read off the provider's document -------------------------
+
+
+def test_the_counters_are_read_again_rather_than_read_back():
+    """A stored turn is re-read, not believed.
+
+    The turns already in the database were written while llm's flattened
+    details were the only source, so they carry an OpenRouter cache read of
+    "unreported" beside a document that says 0. A stored figure cannot be
+    repaired by a later reader; a derived one is repaired by being derived,
+    which is how ``raw`` and ``cost`` are already treated.
+    """
+    stored = {
+        "model": "openai/gpt-5.4",
+        "provider": "openrouter",
+        "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 8,
+            "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 900},
+        },
+        # What the old reader wrote down, and what it got wrong.
+        "counts": {
+            "input": 1200,
+            "output": 8,
+            "cache_creation": None,
+            "cache_read": None,
+        },
+    }
+
+    view = ResponseView.from_dict(stored)
+
+    assert view.counts == {
+        "input": 1200,
+        "output": 8,
+        "cache_creation": 900,
+        "cache_read": 0,
+    }
+    # The stored copy is not part of the object any more, so it cannot be
+    # read back by anything.
+    assert "counts" not in view.__dict__
+
+
+def test_a_turn_no_provider_answers_for_quotes_no_counters():
+    """A model from a plugin that is no longer installed.
+
+    Nobody can say what its counters were called, so the reading is empty and
+    the summary falls back to the one spelling every stored record was
+    written in. On somebody else's document that finds nothing, and it says
+    so rather than guessing at a name that might be right.
+    """
+    view = ResponseView.from_dict(
+        {
+            "model": "somebody/else-model",
+            "usage": {
+                "input_tokens": 12,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            },
+        }
+    )
+
+    assert view.counts == {}
+    assert view.summary() == (
+        "input 12 · output unreported · cache creation unreported"
+        " · cache read unreported · web searches unreported"
+    )
+
+
 # --- the cost estimate rides the record -----------------------------------------
 
 

@@ -408,7 +408,7 @@ class _Dumps:
         return self._dumped
 
 
-def _responses_reply(text, usage, incomplete):
+def _responses_reply(text, usage, incomplete, model):
     """What OpenRouter streams on the Responses path.
 
     ``llm`` reads the answer off ``response.output_text.delta`` and takes the
@@ -423,7 +423,13 @@ def _responses_reply(text, usage, incomplete):
     """
     final = {
         "id": "resp_fake",
-        "model": "openai/gpt-5.4",
+        # The model the request named, not a constant. The real API echoes
+        # back the slug it was asked for, and this app reads the response's
+        # own model to decide which price list applies - so a canned one
+        # makes every turn's cost depend on which model a fixture happened to
+        # register, and a registry that installs anything else gets a turn
+        # priced from a model it never sent.
+        "model": model,
         "status": "incomplete" if incomplete else "completed",
         "output": [],
         "usage": usage,
@@ -437,7 +443,7 @@ def _responses_reply(text, usage, incomplete):
     return deltas + [_Event(type=kind, response=response)]
 
 
-def _chat_reply(text, usage, incomplete):
+def _chat_reply(text, usage, incomplete, model):
     """What OpenRouter streams on the Chat Completions path.
 
     A different shape entirely: chunks with ``choices[0].delta.content``, and
@@ -454,7 +460,7 @@ def _chat_reply(text, usage, incomplete):
         return _Event(
             id="chatcmpl_fake",
             object="chat.completion.chunk",
-            model="openai/gpt-5.4",
+            model=model,
             created=0,
             choices=[choice],
             usage=_Dumps(usage) if usage else None,
@@ -490,7 +496,11 @@ class _FakeOpenAICalls:
 
     def create(self, **kwargs):
         self.sent.append((self.name, kwargs))
-        return _FakeOpenAIStream(REPLY_SHAPES[self.name](*self.sent.reply))
+        # The model the request named is the model the reply reports, the way
+        # the API does it: a fake that answers with a constant describes a
+        # different turn whenever a fixture registers anything else.
+        reply = REPLY_SHAPES[self.name](*self.sent.reply, model=kwargs.get("model"))
+        return _FakeOpenAIStream(reply)
 
 
 class _SentCalls(list):

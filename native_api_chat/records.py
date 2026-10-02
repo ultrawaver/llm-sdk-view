@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .pricing import cost_breakdown, provider_of
+from .providers import Provider, provider_by_id, provider_for
 
 SOURCE = "native-api-chat"
 
@@ -64,6 +65,25 @@ def provider_of_request(options: dict | None) -> str | None:
     longer installed. Nothing is then answerable for its prices.
     """
     return provider_of((options or {}).get("model"))
+
+
+def _counter_reader(provider: str | None, model: str | None) -> Provider | None:
+    """The provider whose vocabulary this turn's counters are written in.
+
+    The recorded provider wins, and the model id only fills the gap a turn
+    stored before that field existed leaves - the same order ``ResponseView``
+    itself reads its provider in, and the same call this app makes before
+    sending. None means no provider answers for the turn: a model from a
+    plugin that is no longer installed, whose counters nobody can spell.
+    """
+    if provider:
+        return provider_by_id(provider)
+    if not model:
+        return None
+    try:
+        return provider_for(model)
+    except ValueError:
+        return None
 
 
 def _as_blocks(message: dict | None) -> list[dict]:
@@ -113,13 +133,26 @@ def _server_tool_blocks(blocks: list[dict]) -> list[dict]:
     return [block for block in blocks if block.get("type") in SERVER_TOOL_BLOCKS]
 
 
-def _usage(response: Any, message: dict | None) -> dict:
+def usage_document(response: Any, message: dict | None = None) -> dict:
     """The counts the provider reported, with nothing invented.
+
+    This is the provider's own usage object, kept whole, with llm's flattened
+    reading of it folded in underneath for the shapes that arrive without
+    one. It is the document a provider is asked to read its counters out of,
+    because what a counter is called and where it nests is the provider's
+    business. llm's ``token_details`` is a lossy copy of the same thing:
+    ``simplify_usage_dict`` deletes every key valued 0 and every dict that
+    flattens to nothing, so an OpenRouter turn that reused no cached tokens
+    arrived looking like a turn that never reported its cache at all.
 
     llm-anthropic moves ``usage`` off the Message and onto the Response as it
     consumes the stream, so the Response - not the Message - is where the
-    numbers live by the time a turn is finished.
+    numbers live by the time a turn is finished. Anything the Message still
+    carries is folded in first, because the provider's own spelling beats
+    llm's flattening of it.
     """
+    if message is None:
+        message = getattr(response, "response_json", None) or {}
     usage: dict[str, Any] = {}
     raw = (message or {}).get("usage")
     if isinstance(raw, dict):
@@ -175,18 +208,19 @@ def usage_summary(usage: dict, counts: dict | None = None) -> str:
 
     The cache figures come from ``counts`` - the sending provider's own
     reading - rather than from the raw document, because only the provider
-    knows where its API puts them. OpenRouter nests the read one level down
-    and under a different parent per transport, so Anthropic's spelling found
+    knows where its API puts them. OpenRouter nests them one level down and
+    under a different parent per transport, so Anthropic's spelling found
     nothing and reported "unreported" for a turn that reported 0.
+
+    An empty ``counts`` means no installed provider answers for this turn.
+    There is then no vocabulary to read it in, and the document's own
+    Anthropic names are the only spelling left to try - which finds nothing
+    on anybody else's document, and says "unreported" rather than inventing.
     """
     if counts:
         creation = counts.get("cache_creation")
         read = counts.get("cache_read")
     else:
-        # A record stored before the counters were read per provider. Every
-        # one of those is an Anthropic turn, so its figures really are in the
-        # document under Anthropic's own names - this is the stored shape,
-        # not a guess at an unknown one.
         creation = usage.get("cache_creation_input_tokens")
         read = usage.get("cache_read_input_tokens")
     parts = [
@@ -297,13 +331,6 @@ class ResponseView:
     stop_reason: str | None
     usage: dict
     response_json: dict | None
-    # The same counters, read by the provider that sent the turn and reduced
-    # to this app's four names. ``usage`` above is the provider's own
-    # document, which is what the Response pane shows; a figure is read from
-    # here, because "the cache read" is spelt differently on every API - and
-    # is nested on both OpenRouter paths, where Anthropic's spelling finds
-    # nothing and every turn reads as a cache miss.
-    counts: dict = field(default_factory=dict)
     #: Which provider sent this turn, so its cost is read from that
     #: provider's own prices. The model id cannot say: both providers price a
     #: different document, and OpenRouter answers with the catalogue slug
@@ -314,6 +341,27 @@ class ResponseView:
     # Older stored records predate both, so None means "not measured".
     duration_ms: int | None = None
     ttft_ms: int | None = None
+
+    @property
+    def counts(self) -> dict:
+        """The same counters, read by the provider that sent the turn.
+
+        ``usage`` above is the provider's own document, which is what the
+        Response pane prints; a figure is read from here, because "the cache
+        read" is spelt differently on every API - nested on both OpenRouter
+        transports, where Anthropic's spelling finds nothing and every turn
+        reads as a cache miss.
+
+        Derived like ``raw`` and ``cost``, and for the same reason: a stored
+        copy is a second reading that goes stale the moment the reader
+        changes. This one had already gone stale in a way nobody could
+        repair - the turns stored while llm's flattened details were the only
+        source had an OpenRouter cache read of "unreported" written into
+        them, and no later reader could correct a number that was stored
+        rather than taken.
+        """
+        reader = _counter_reader(self.provider, self.model)
+        return reader.usage_from(self.usage) if reader is not None else {}
 
     def summary(self) -> str:
         return usage_summary(self.usage, self.counts)
@@ -401,7 +449,6 @@ class ResponseView:
             server_tool_blocks=data.get("server_tool_blocks") or [],
             stop_reason=data.get("stop_reason"),
             usage=data.get("usage") or {},
-            counts=data.get("counts") or {},
             provider=data.get("provider") or provider,
             response_json=data.get("response_json"),
             duration_ms=data.get("duration_ms"),
@@ -413,7 +460,6 @@ def build_response_view(
     response: Any,
     ttft_ms: int | None = None,
     provider: Any = None,
-    counts: dict | None = None,
 ) -> ResponseView:
     """Read the Answer off the Message the SDK finished with.
 
@@ -423,11 +469,9 @@ def build_response_view(
     ``provider`` is the one that sent it, and it is asked about every part of
     that Message whose shape differs between providers. Without it the
     Anthropic shape is assumed: right for Anthropic, and on either OpenRouter
-    path it finds no text and no stop reason at all.
-
-    ``counts`` is that provider's reading of its own counters, passed in
-    rather than read again here: the session has already asked for it, and a
-    second reading is a second answer that can disagree with the first.
+    path it finds no text and no stop reason at all. Its counters are read
+    through the same provider, off the same document, so a session's own
+    reading of them and the view's cannot part company.
     """
     message = getattr(response, "response_json", None) or {}
     blocks = provider.blocks(message) if provider else _as_blocks(message)
@@ -447,8 +491,7 @@ def build_response_view(
         citations=_citations(blocks),
         server_tool_blocks=_server_tool_blocks(blocks),
         stop_reason=stop_reason,
-        usage=_usage(response, message),
-        counts=counts or {},
+        usage=usage_document(response, message),
         provider=getattr(provider, "id", None),
         response_json=message or None,
         duration_ms=_duration_ms(response),

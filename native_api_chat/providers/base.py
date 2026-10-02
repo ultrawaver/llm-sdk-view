@@ -37,6 +37,24 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 
+def first_int(source: dict, *fields: str) -> int | None:
+    """The first of these document fields that is really a whole number.
+
+    Two providers call the same counter two names - OpenRouter writes the
+    prompt as ``input_tokens`` on one transport and ``prompt_tokens`` on the
+    other - so a reader has to try each name before it may say the provider
+    reported nothing. It returns None rather than 0 for a missing field,
+    because "did not report" and "reported zero" are different answers and
+    only the second one is a measurement. ``bool`` is excluded: ``true`` is
+    not a token count.
+    """
+    for field in fields:
+        value = source.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
 @dataclass(frozen=True)
 class Transport:
     """One SDK call, in the pieces needed to print it back verbatim.

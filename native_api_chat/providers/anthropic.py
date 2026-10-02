@@ -40,7 +40,7 @@ from ..turn import (
     estimate_text,
     option_list,
 )
-from .base import Transport
+from .base import Transport, first_int
 
 # Explicit, versioned tool types only. "latest" aliases are never sent.
 WEB_SEARCH_TYPES = ("web_search_20260318", "web_search_20250305")
@@ -519,6 +519,12 @@ class AnthropicProvider:
     # messages.count_tokens is Anthropic's own, free, and the reason the
     # context figure can be exact before a turn is sent.
     counts_tokens = True
+    # The counts that occupy context, and they add up because Anthropic
+    # reports the uncached input, the writes and the reads as three separate
+    # counts of disjoint tokens. The cached prefix occupies context exactly
+    # like fresh tokens do, so leaving the cache out under-reports the moment
+    # caching starts working.
+    context_counts = ("input", "cache_creation", "cache_read", "output")
 
     def owns(self, model_id: str) -> bool:
         """Claimed by prefix, and deliberately not as a catch-all.
@@ -830,19 +836,25 @@ class AnthropicProvider:
     def estimate_input_tokens(self, kwargs: dict) -> int | None:
         return estimate_request_tokens(kwargs)
 
-    def usage_from(self, usage: Any, details: dict) -> dict:
+    def usage_from(self, document: dict) -> dict:
         """The provider's own counts, under the names this app reports.
 
-        llm's ``input``/``output`` are the uncached counts; the cache counters
-        live in the details ``llm-anthropic`` kept. The context the model
-        really saw is all three - counting only the uncached part under-reports
-        the moment the cache starts doing its job.
+        ``input_tokens`` is the **uncached** part of the prompt; the cache
+        writes and reads are counted beside it, not inside it. That is what
+        makes :attr:`context_counts` a sum of all four here and only two on
+        OpenRouter, where the prompt arrives whole.
+
+        Read off the document rather than off llm's ``token_details``, which
+        is the same object after ``simplify_usage_dict`` has deleted every
+        zero and every dict that flattened to nothing - a turn that reported
+        no cache activity and a turn that reported nothing at all come out of
+        it identical.
         """
         return {
-            "input": getattr(usage, "input", None),
-            "output": getattr(usage, "output", None),
-            "cache_creation": details.get("cache_creation_input_tokens"),
-            "cache_read": details.get("cache_read_input_tokens"),
+            "input": first_int(document, "input_tokens"),
+            "output": first_int(document, "output_tokens"),
+            "cache_creation": first_int(document, "cache_creation_input_tokens"),
+            "cache_read": first_int(document, "cache_read_input_tokens"),
         }
 
 

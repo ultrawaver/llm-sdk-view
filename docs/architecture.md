@@ -205,15 +205,32 @@ two functions rather than by one with a provider flag:
 - Anthropic reports the **uncached** part of the prompt as `input_tokens` and
   bills cache writes and reads beside it - so the turn's total input is their
   sum.
-- OpenRouter reports the **whole prompt**, cached part included, because llm
-  reads its `prompt_tokens`. The cached tokens are a slice of that number and
-  not a second count on top, and billing both would charge them twice.
+- OpenRouter reports the **whole prompt**, cached and written parts included,
+  because llm reads its `prompt_tokens`. Both cache counters are slices of
+  that number and not second counts on top, and billing both would charge
+  those tokens twice.
 
-OpenRouter reports no cache-write count on either transport, and no search
-count reaches this app. Neither is invented, and where a model's row prices a
-write or a search the receipt names the gap - an absent row reads as a free
-one otherwise. A cache read this app cannot see is priced at the input rate,
-and the line says it was unreported rather than reported as zero.
+What a counter is called, where it nests, and which of them add up are provider
+facts, so each provider answers them. `usage_from` reads the counters off the
+provider's own usage document, never off llm's `token_details`: that copy is
+the same object *after* `simplify_usage_dict` has deleted every key valued `0`,
+so a turn that reported `cached_tokens: 0` reaches it looking exactly like a
+turn that reported nothing at all. "No cache read" and "a cache read of
+nothing" are different answers and only the second is a measurement.
+`context_counts` names the counts that occupy context - all four on Anthropic,
+only `input` and `output` on OpenRouter, where the cache is already inside the
+prompt - so one sum cannot be applied to both.
+
+Both providers report a cache write, under a field sent only for models that
+price one, and OpenRouter reports a search in the same `server_tool_use` count
+Anthropic uses. A receipt therefore carries a write row on every turn and a
+search row wherever the catalogue prices one. Four things are still never
+invented: a counter that did not arrive is "unreported" rather than a zero; a
+write that arrived with no TTL is counted and left unpriced, because the
+catalogue may price two TTLs differently and neither is the one the API named;
+a rate the catalogue never published prints "no published rate" rather than
+`$0.00 / MTok`, which is a claim that the model charges nothing; and a cache
+read this app cannot see is priced at the input rate, with the line saying so.
 
 Two more facts live in the catalogue and are read rather than derived: the
 `:batch` and `:free` tiers are rows of their own, matched exactly, because
@@ -263,6 +280,12 @@ requests is invisible locally: Anthropic expands the 70-character `web_search`
 stub into roughly 2,200 input tokens (measured 2026-09-27: haiku-4-5 went from
 12 tokens to 2,220 when the stub was added, sonnet-5 from 12 to 2,806). Nothing
 in the request body shows them.
+
+Which counts those are is the sending provider's own arithmetic, not a
+constant: Anthropic counts the uncached input *beside* its cache counters,
+while OpenRouter counts a prompt that already contains them. `context_counts`
+names them, so one sum cannot be applied to both and report one provider's
+conversation as fuller than it is.
 
 When the figure plus the reserved output cannot fit, sending is refused with the
 two ways out — lower `max_tokens` or start a new conversation. The same figure

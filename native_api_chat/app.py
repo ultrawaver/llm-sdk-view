@@ -47,9 +47,12 @@ def _prior_usage(conversation_id: str | None) -> dict | None:
 
     A cheap and exact answer to "how full is this conversation", and the one
     the meter should show the moment a stored conversation is opened: the API
-    already reported it, so nothing has to be estimated or fetched. Context
-    after a turn is the whole input (uncached + cache write + cache read) plus
-    the reply it produced, which becomes part of the next request.
+    already reported it, so nothing has to be estimated or fetched.
+
+    The counts are the record's own reading of the turn, which is where they
+    belong: they were written in the sending provider's vocabulary, and this
+    function spelling them in Anthropic's is how an OpenRouter cache read
+    came back absent from a turn that had reported one.
 
     Returns None when there is no stored turn or no counts on it, so a caller
     falls through to the counter and then to a labelled estimate.
@@ -63,13 +66,7 @@ def _prior_usage(conversation_id: str | None) -> dict | None:
     turns = (stored or {}).get("turns") or []
     if not turns:
         return None
-    usage = getattr(turns[-1].response, "usage", None) or {}
-    counts = {
-        "input": usage.get("input_tokens"),
-        "output": usage.get("output_tokens"),
-        "cache_creation": usage.get("cache_creation_input_tokens"),
-        "cache_read": usage.get("cache_read_input_tokens"),
-    }
+    counts = getattr(turns[-1].response, "counts", None) or {}
     return counts if any(isinstance(value, int) for value in counts.values()) else None
 
 

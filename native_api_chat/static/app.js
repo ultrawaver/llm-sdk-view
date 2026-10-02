@@ -360,13 +360,20 @@ function conversationTotals() {
   };
 }
 
+/* The three cache writes are one colour: which of them a receipt carries is
+   the sending provider's business, and a reader does not learn anything from
+   Anthropic's 5m/1h split and OpenRouter's single un-TTL'd count being drawn
+   differently. `cache_write` is OpenRouter's own - one count, no TTL stated -
+   and it needs a colour of its own here, because a key this table does not
+   name renders as no colour at all rather than as a default one. */
 const COST_COLORS = {
-  output: 'out', uncached_input: 'uncached', cache_write_5m: 'cw',
-  cache_write_1h: 'cw', cache_read: 'cr', web_search: 'tool'
+  output: 'out', uncached_input: 'uncached', cache_write: 'cw',
+  cache_write_5m: 'cw', cache_write_1h: 'cw', cache_read: 'cr',
+  web_search: 'tool'
 };
 const COST_STACK_ORDER = [
-  'output', 'uncached_input', 'cache_write_5m', 'cache_write_1h',
-  'cache_read', 'web_search'
+  'output', 'uncached_input', 'cache_write', 'cache_write_5m',
+  'cache_write_1h', 'cache_read', 'web_search'
 ];
 const COST_GROUP_NAMES = { input: 'Input', output: 'Output', tools: 'Tools' };
 

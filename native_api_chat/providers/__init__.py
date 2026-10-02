@@ -23,4 +23,16 @@ def provider_for(model_id: str) -> Provider:
     raise ValueError(f"no provider claims {model_id!r}")
 
 
-__all__ = ["PROVIDERS", "Provider", "Transport", "provider_for"]
+def provider_by_id(provider_id: str | None) -> Provider | None:
+    """The provider with this id, or None when no installed one answers to it.
+
+    A stored turn records who sent it, which is a better answer than reading
+    the model id back, and does not stop being one when the model is a bare
+    catalogue slug that carries none of llm's routing prefix. None means the
+    plugin that sent it is not installed here any more: nobody is then
+    answerable for the vocabulary its counters were written in.
+    """
+    return next((p for p in PROVIDERS if p.id == provider_id), None)
+
+
+__all__ = ["PROVIDERS", "Provider", "Transport", "provider_by_id", "provider_for"]

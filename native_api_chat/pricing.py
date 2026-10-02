@@ -16,8 +16,8 @@ What is still true and still matters:
   as unavailable rather than presented as live.
 - The two providers do not spell the same thing the same way. Anthropic
   reports the uncached part of the prompt as ``input_tokens`` and bills cache
-  writes and reads beside it; OpenRouter reports the whole prompt, cached part
-  included, and reports no cache write at all. Pricing one provider's counters
+  writes and reads beside it; OpenRouter reports the whole prompt, with the
+  cached and written tokens as slices of it. Pricing one provider's counters
   with the other's arithmetic reads like a working number, which is why the
   two are separate functions below.
 """
@@ -92,8 +92,24 @@ def rates_for(model: str | None) -> ModelRates | None:
     return _match(rates_page.table(), model)
 
 
+#: What a line says where the rates source publishes no rate for it.
+NO_RATE = "no published rate"
+
+
 def _int(value: Any) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _rate_label(rate: float | None) -> str:
+    """A rate as a receipt prints it, or the fact that there is not one.
+
+    A line whose rate is unknown must not print ``$0.00 / MTok``. A price of
+    nothing and no price at all are different claims, and only one of them is
+    true when the catalogue never mentioned the counter: the receipt would be
+    telling the reader the provider charges nothing for something it merely
+    did not price.
+    """
+    return NO_RATE if rate is None else f"${rate:.2f} / MTok"
 
 
 def _line(
@@ -101,13 +117,21 @@ def _line(
     label: str,
     group: str,
     quantity: int,
-    rate: float,
+    rate: float | None,
     rate_label: str,
     note: str | None = None,
     reported: bool = True,
     per_mtok: bool = True,
 ) -> dict:
-    per_unit = rate / 1_000_000 if per_mtok else rate
+    """One receipt row. ``rate`` may be None, and then the row costs nothing.
+
+    The count is still shown, and ``rate_label`` is what says why the amount
+    is zero - the alternative, dropping the row, hides a counter the provider
+    did report simply because this document does not price it.
+    """
+    per_unit = 0.0
+    if rate is not None:
+        per_unit = rate / 1_000_000 if per_mtok else rate
     return {
         "key": key,
         "label": label,
@@ -302,20 +326,55 @@ def _anthropic_cost(model: str | None, usage: dict | None) -> dict | None:
     }
 
 
+def _slice(value: Any, ceiling: int) -> int | None:
+    """A counter that is part of a larger one, held inside it.
+
+    A cache counter larger than the prompt it is a slice of is a broken
+    reading and not a bigger bill, so it is clamped rather than believed.
+    ``None`` stays ``None``: not reported and reported zero are different
+    answers, and only the second one is a measurement.
+    """
+    count = _int(value)
+    if count is None:
+        return None
+    return min(max(count, 0), max(ceiling, 0))
+
+
+def _write_rate(rates: rates_openrouter.ModelRates) -> float | None:
+    """The one rate a cache write can be charged at, or None if there is none.
+
+    OpenRouter reports a single write count and states no TTL for it, while
+    the catalogue may price two - and does, differently, for the 33 rows that
+    carry both. Charging the count at either one would be picking a price the
+    API did not name; the receipt shows the count and leaves the rate out.
+    A model that publishes one rate publishes the rate that applies.
+    """
+    five_minute, one_hour = rates.cache_write_5m, rates.cache_write_1h
+    if five_minute is None:
+        return one_hour
+    if one_hour is None or one_hour == five_minute:
+        return five_minute
+    return None
+
+
 def _openrouter_cost(model: str | None, usage: dict, counts: dict) -> dict | None:
     """OpenRouter's counters against OpenRouter's own catalogue prices.
 
-    Three things differ from the Anthropic path, and each one is a fact about
+    Four things differ from the Anthropic path, and each one is a fact about
     the API rather than a preference:
 
-    - ``input_tokens`` is the **whole prompt**, cached part included, because
-      llm reads OpenRouter's ``prompt_tokens``. The cached tokens are a slice
-      of it, so charging all of it at the input rate *and* the cache read at
-      its own rate would bill the cached tokens twice.
-    - **No cache write count exists on either transport**, so no write is
-      priced - rather than a write being assumed at some rate.
-    - **No search count reaches this app either**, so a priced search is not
-      in the total; the receipt says so where the model prices one.
+    - ``input_tokens`` is the **whole prompt**, cached and written parts
+      included, because llm reads OpenRouter's ``prompt_tokens``. Both cache
+      counters are slices of it, so charging all of it at the input rate *and*
+      a slice at its own rate would bill those tokens twice.
+    - **A cache write is reported**, so a turn that wrote one says so. The
+      field is only sent for models with a cache-write price, which is why an
+      absent one is "not reported" rather than a zero.
+    - **A search is reported too**, in the same ``server_tool_use`` count
+      Anthropic uses, so a priced search is charged rather than only written
+      about.
+    - **The write count carries no TTL**, so a model that prices two
+      differently gets its write counted and not charged.
     """
     row = rates_openrouter.rates_for(model)
     if row is None or not usage:
@@ -325,45 +384,62 @@ def _openrouter_cost(model: str | None, usage: dict, counts: dict) -> dict | Non
     if prompt is None or output is None:
         return None
 
-    cached = _int(counts.get("cache_read"))
-    if cached is not None:
-        # A floor and a ceiling, because a counter larger than the prompt it
-        # is a part of is a broken reading and not a bigger bill.
-        cached = min(max(cached, 0), prompt)
+    cached = _slice(counts.get("cache_read"), prompt)
+    written = _slice(counts.get("cache_creation"), prompt - (cached or 0))
     rates = row.at(prompt)
     if cached and rates.cache_read is None:
         # A cached read this model does not price: there is no rate to use,
         # and the input rate would be an invention.
         return None
 
-    uncached = prompt - (cached or 0)
-    cache_read_rate = rates.cache_read or 0.0
+    uncached = prompt - (cached or 0) - (written or 0)
+    write_rate = _write_rate(rates)
     uncached_note = "after the last cache breakpoint"
     if cached is None:
         uncached_note = "cache read unreported"
 
+    searches = _int(usage.get("web_search_requests")) or 0
+
     lines = [
         _line(
             "uncached_input", "Uncached input", "input", uncached, rates.input,
-            f"${rates.input:.2f} / MTok", note=uncached_note,
+            _rate_label(rates.input), note=uncached_note,
         ),
         _line(
             "cache_read", "Cache read (hit)", "input", cached or 0,
-            cache_read_rate, f"${cache_read_rate:.2f} / MTok",
+            rates.cache_read, _rate_label(rates.cache_read),
+            note="unreported" if cached is None else None,
             reported=cached is not None,
         ),
         _line(
+            "cache_write", "Cache write", "input", written or 0,
+            write_rate, _rate_label(write_rate),
+            note="unreported" if written is None else None,
+            reported=written is not None,
+        ),
+        _line(
             "output", "Output", "output", output, rates.output,
-            f"${rates.output:.2f} / MTok",
+            _rate_label(rates.output),
         ),
     ]
+    if row.web_search is not None:
+        lines.append(
+            _line(
+                "web_search", "Web search", "tools", searches,
+                row.web_search, f"${row.web_search:.2f} / search",
+                per_mtok=False,
+            )
+        )
 
     total = round(sum(line["amount"] for line in lines), 6)
-    # The prompt *is* the total here: the cached tokens are already counted
-    # inside it.
+    # The prompt *is* the whole input here: the cached and the written tokens
+    # are already counted inside it.
     input_total = prompt
     no_cache_total = round(
-        prompt * rates.input / 1_000_000 + output * rates.output / 1_000_000, 6
+        prompt * rates.input / 1_000_000
+        + output * rates.output / 1_000_000
+        + searches * (row.web_search or 0.0),
+        6,
     )
     input_cost = sum(line["amount"] for line in lines if line["group"] == "input")
 
@@ -378,18 +454,16 @@ def _openrouter_cost(model: str | None, usage: dict, counts: dict) -> dict | Non
         # conversation total whenever every turn in it agreed on it.
         notes.append("OpenRouter did not report a cache read — "
                      "the whole prompt is priced at the input rate")
-    unpriced = []
-    if rates.cache_write_5m is not None or rates.cache_write_1h is not None:
-        unpriced.append("cache writes")
-    if row.web_search is not None:
-        unpriced.append("searches")
-    if len(unpriced) == 1:
-        notes.append(f"{unpriced[0]} are not in this total — OpenRouter "
-                     "reports no count for them")
-    elif unpriced:
-        notes.append(" and ".join(unpriced)
-                     + " are not in this total — OpenRouter reports no count "
-                     "for either")
+    if written is None and (rates.cache_write_5m or rates.cache_write_1h):
+        # Only worth a sentence where the model prices a write: elsewhere the
+        # counter would cost nothing even if it had been sent.
+        notes.append("OpenRouter did not report a cache write — any written "
+                     "tokens are priced at the input rate")
+    if written and write_rate is None:
+        notes.append(_unpriced_write_note(rates))
+    if row.web_search is not None and not searches:
+        notes.append("searches are not in this total — OpenRouter reported no "
+                     "search count")
 
     return {
         "currency": "USD",
@@ -398,7 +472,7 @@ def _openrouter_cost(model: str | None, usage: dict, counts: dict) -> dict | Non
         "lines": lines,
         "total": total,
         "input_total_tokens": input_total,
-        "cache_counters_reported": cached is not None,
+        "cache_counters_reported": cached is not None or written is not None,
         "cache_hit_rate": (cached or 0) / input_total if input_total else None,
         "no_cache_total": no_cache_total,
         "savings": round(no_cache_total - total, 6),
@@ -408,3 +482,16 @@ def _openrouter_cost(model: str | None, usage: dict, counts: dict) -> dict | Non
         "notes": notes,
         **rates_openrouter.provenance(),
     }
+
+
+def _unpriced_write_note(rates: rates_openrouter.ModelRates) -> str:
+    """Why a counted cache write is not in the total, in the terms it is not."""
+    if rates.cache_write_5m is not None and rates.cache_write_1h is not None:
+        return (
+            "the cache write is counted but not priced: OpenRouter reports one "
+            "write count and no TTL for it, and this model prices 5m at "
+            + _rate_label(rates.cache_write_5m) + " and 1h at "
+            + _rate_label(rates.cache_write_1h)
+        )
+    return ("the cache write is counted but not priced: this model publishes "
+            "no cache-write rate")

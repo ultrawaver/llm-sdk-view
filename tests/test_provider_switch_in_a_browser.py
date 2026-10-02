@@ -20,6 +20,7 @@ a throwaway directory, and the browser only ever loads localhost.
 """
 
 import pytest
+from conftest import catalogue_entry
 
 pytestmark = pytest.mark.browser
 
@@ -753,6 +754,37 @@ def test_reopening_hands_the_form_back_to_the_conversations_own_provider(sending
     assert "legacy" not in page.text_content('[data-pill="model"]')
 
 
+def _receipt_rows(page, selector="#costPop"):
+    """Every drawn receipt row, with the geometry that decides if it reads."""
+    return page.evaluate(
+        """(root) => {
+            const pop = document.querySelector(root).getBoundingClientRect();
+            return Array.from(
+                document.querySelectorAll(root + ' .cost-line')
+            ).map((row) => {
+                const what = row.querySelector('.what');
+                const rate = row.querySelector('.rate');
+                const box = row.getBoundingClientRect();
+                const first = what.childNodes[0];
+                return {
+                    // The row's own name, without the note under it: the note
+                    // is a child element, and textContent runs the two
+                    // together with no separator at all.
+                    name: first ? first.textContent : what.textContent,
+                    label: what.textContent,
+                    cls: what.className,
+                    rate: rate.textContent,
+                    swatch: getComputedStyle(what, '::before')
+                        .getPropertyValue('background-color'),
+                    clipped: rate.scrollWidth > rate.clientWidth + 1,
+                    insidePopover: box.right <= pop.right + 1,
+                };
+            });
+        }""",
+        selector,
+    )
+
+
 def test_an_openrouter_turn_shows_what_it_cost(sending, fake_openrouter):
     """The receipt is the same one, priced from the other provider's prices.
 
@@ -791,9 +823,104 @@ def test_an_openrouter_turn_shows_what_it_cost(sending, fake_openrouter):
     pop = page.text_content("#costPop")
     assert "OpenRouter catalogue" in pop, pop
     assert "Uncached input" in pop and "Cache read (hit)" in pop, pop
-    # And the two counters this API does not report are named rather than
-    # left as rows that read $0.00.
-    assert "OpenRouter reports no count" in pop, pop
+
+    # The write is a row of its own now. This turn reported only a read, so
+    # the row says that rather than reading as a turn that wrote nothing.
+    rows = {row["name"]: row for row in _receipt_rows(page)}
+    assert "Cache write" in rows, rows
+    assert "unreported" in rows["Cache write"]["label"], rows["Cache write"]
+    # An uncoloured row is what a line key the colour table does not know
+    # looks like, and it is only visible by painting it.
+    assert rows["Cache write"]["cls"] == "what d-cw", rows["Cache write"]
+    assert rows["Cache write"]["swatch"] not in (
+        "rgba(0, 0, 0, 0)", "transparent"
+    ), rows["Cache write"]
+
+    # And a count that did not arrive is named as not having arrived. The
+    # sentence this replaced said OpenRouter had no count to send, which was
+    # untrue of the write - sent for models that price one - and of the
+    # search, which arrives in the count the shared reader already hoists.
+    assert "OpenRouter reports no count" not in pop, pop
+    assert "did not report a cache write" in pop, pop
+    assert page.errors == []
+
+
+#: A catalogue row that prices neither cache counter and no search: what a
+#: receipt has to label rather than print a rate of $0.00 beside.
+#:
+#: Derived from the shared entry rather than written out, so that it differs
+#: from a priced row *only* in the rows it withholds. The hand-copied version
+#: of this fixture is how it came to declare an 8192 completion ceiling while
+#: the form's own default is 16384 - and the send was then refused, correctly,
+#: by the ceiling check. A fixture that fails for a reason it is not about is
+#: a fixture that measures nothing.
+UNPRICED_MODEL = {
+    **catalogue_entry(
+        "vendor/no-cache-rates",
+        canonical_slug="vendor/no-cache-rates-20260630",
+        name="No cache rates",
+    ),
+    "pricing": {"prompt": "0.0000025", "completion": "0.00001"},
+}
+
+
+@pytest.fixture
+def sending_unpriced(openrouter_registry, fake_openrouter, browser, live_app):
+    """A page whose only OpenRouter model publishes no cache rates."""
+    openrouter_registry(UNPRICED_MODEL)
+    fake_openrouter.answers("Hi there.")
+    context = browser.new_context(viewport={"width": 1500, "height": 820})
+    page = context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.errors = errors
+    page.goto(live_app)
+    page.wait_for_selector('#settingsPills [data-pill="model"]')
+    page.wait_for_function("() => (state.data.provider.options || []).length > 1")
+    try:
+        yield page
+    finally:
+        context.close()
+
+
+def test_a_rate_the_catalogue_never_published_is_not_drawn_as_zero(
+    sending_unpriced, fake_openrouter
+):
+    """The word that replaces the figure, at the width it really renders at.
+
+    ``$0.00 / MTok`` beside a counter the catalogue never priced tells the
+    reader the model charges nothing for it. The sentence that replaces it is
+    longer than the figure was, in a grid whose label column is the one that
+    gives - so the row is measured where it is drawn, not counted in a string.
+    """
+    page = sending_unpriced
+    fake_openrouter.answers(
+        "Hi there.",
+        usage={
+            "input_tokens": 1200,
+            "output_tokens": 900,
+            "input_tokens_details": {"cached_tokens": 0},
+        },
+    )
+    switch_to(page, "openrouter")
+    page.fill("#prompt", "hello")
+    page.click("#send")
+    page.wait_for_function(
+        "() => state.turns.length === 1"
+        " && state.turns[0].response.cost !== null"
+    )
+    page.click("#costToggle")
+    page.wait_for_selector("#costPop .cost-line")
+
+    rows = _receipt_rows(page)
+    rates = {row["name"]: row["rate"] for row in rows}
+    assert rates["Cache read (hit)"] == "no published rate", rates
+    assert rates["Cache write"] == "no published rate", rates
+    assert "$0.00 / MTok" not in page.text_content("#costPop")
+    # Neither column is clipped and no row runs past the card it is drawn in.
+    for row in rows:
+        assert row["clipped"] is False, row
+        assert row["insidePopover"] is True, row
     assert page.errors == []
 
 
