@@ -608,6 +608,30 @@ def catalogue_entry(model_id: str, **overrides) -> dict:
     return entry
 
 
+def reasoning_entry(
+    model_id: str, efforts=None, mandatory=False, default=None
+) -> dict:
+    """A catalogue entry for a model that states its own reasoning rules.
+
+    OpenRouter publishes these in the entry's own ``reasoning`` object, and
+    the keys are its own: ``supported_efforts`` in descending order,
+    ``default_effort``, and ``mandatory``. A model whose entry carries none of
+    them is a different case and this helper is not it.
+    """
+    reasoning: dict = {"mandatory": mandatory}
+    if efforts is not None:
+        reasoning["supported_efforts"] = list(efforts)
+    if default is not None:
+        reasoning["default_effort"] = default
+    return catalogue_entry(
+        model_id,
+        supported_parameters=["max_tokens", "reasoning", "reasoning_effort"],
+        pricing={},
+        top_provider={"max_completion_tokens": 128_000},
+        reasoning=reasoning,
+    )
+
+
 @pytest.fixture
 def openrouter_catalogue():
     """Install catalogue entries as this project's own disk cache."""

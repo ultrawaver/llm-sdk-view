@@ -11,9 +11,11 @@ Nothing reaches the network, and no test needs a key.
 
 import llm
 import pytest
+from conftest import reasoning_entry
 
 from native_api_chat.providers.openrouter import (
     OMITTED,
+    REASONING_EFFORTS,
     OpenRouterOptions,
     OpenRouterProvider,
 )
@@ -49,6 +51,17 @@ def build(openrouter_registry):
         return settled, kwargs
 
     return factory
+
+
+@pytest.fixture
+def reasoning_model(openrouter_catalogue):
+    """Install a catalogue entry whose model states its own reasoning rules."""
+
+    def install(slug, efforts=None, mandatory=False, default=None):
+        openrouter_catalogue(reasoning_entry(slug, efforts, mandatory, default))
+        return f"openrouter/{slug}"
+
+    return install
 
 
 # --- the shape of the options -----------------------------------------------
@@ -103,15 +116,90 @@ def test_each_reasoning_field_lands_in_the_reasoning_block(build):
     """They are four separate API fields, so they are four separate controls:
     one slider writing to whichever seemed to fit would be inventing a
     parameter OpenRouter does not have."""
-    _, kwargs = build(
-        reasoning_effort="high", reasoning_max_tokens=2048, reasoning_summary="detailed"
-    )
+    _, kwargs = build(reasoning_effort="high", reasoning_summary="detailed")
 
-    assert kwargs["reasoning"] == {
-        "effort": "high",
-        "max_tokens": 2048,
-        "summary": "detailed",
-    }
+    assert kwargs["reasoning"] == {"effort": "high", "summary": "detailed"}
+
+
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        ({"reasoning_effort": "high"}, {"effort": "high"}),
+        ({"reasoning_max_tokens": 2048}, {"max_tokens": 2048}),
+        ({"reasoning_enabled": True}, {"enabled": True}),
+        ({"reasoning_summary": "detailed"}, {"summary": "detailed"}),
+    ],
+)
+def test_each_of_the_four_reaches_the_request_on_its_own(build, fields, expected):
+    """One at a time, because two of them can no longer be asked for together:
+    the point of the four is that each is its own field, and that is settled
+    by each arriving alone."""
+    _, kwargs = build(**fields)
+
+    assert kwargs["reasoning"] == expected
+
+
+def test_an_effort_and_a_budget_together_are_refused_rather_than_sent(build):
+    """Measured, not read: OpenRouter answers the combination with 400 "Only
+    one of \\"reasoning.effort\\" and \\"reasoning.max_tokens\\" can be
+    specified". A form that offered both fields could otherwise draw - and
+    send - a request the API refuses."""
+    with pytest.raises(UnsupportedOptionError, match="never both"):
+        build(reasoning_effort="high", reasoning_max_tokens=2048)
+
+
+def test_the_budget_alone_is_still_sent(build):
+    """The rule is about the pair, not about the field."""
+    _, kwargs = build(reasoning_max_tokens=2048)
+
+    assert kwargs["reasoning"] == {"max_tokens": 2048}
+
+
+def test_an_effort_the_serving_model_does_not_list_is_refused(reasoning_model):
+    """Those levels are accepted and silently mapped down to the nearest one
+    the model does take, which would make the pane show one setting and the
+    turn run at another."""
+    model_id = reasoning_model("vendor/three-levels-1", ["high", "medium", "low"])
+    capabilities = PROVIDER.capabilities_for(model_id)
+
+    with pytest.raises(UnsupportedOptionError, match="maps"):
+        PROVIDER.accept(
+            OpenRouterOptions(model=model_id, reasoning_effort="max"), capabilities
+        )
+    assert PROVIDER.accept(
+        OpenRouterOptions(model=model_id, reasoning_effort="medium"), capabilities
+    ).reasoning_effort == "medium"
+
+
+def test_a_model_that_requires_reasoning_refuses_both_ways_of_turning_it_off(
+    reasoning_model,
+):
+    """Two different refusals, both measured. The model's own metadata says
+    never to send `effort: "none"`; and `reasoning.enabled=false` comes back
+    400 "Reasoning is mandatory for this endpoint and cannot be disabled."
+    """
+    model_id = reasoning_model(
+        "vendor/mandatory-1", ["max", "high", "low"], mandatory=True
+    )
+    capabilities = PROVIDER.capabilities_for(model_id)
+
+    with pytest.raises(UnsupportedOptionError, match="mandatory"):
+        PROVIDER.accept(
+            OpenRouterOptions(model=model_id, reasoning_effort="none"), capabilities
+        )
+    with pytest.raises(UnsupportedOptionError, match="cannot be disabled"):
+        PROVIDER.accept(
+            OpenRouterOptions(model=model_id, reasoning_enabled=False), capabilities
+        )
+
+
+def test_a_model_reasoning_is_optional_for_still_takes_off(reasoning_model):
+    model_id = reasoning_model("vendor/optional-1", ["high", "low"])
+    capabilities = PROVIDER.capabilities_for(model_id)
+
+    assert PROVIDER.accept(
+        OpenRouterOptions(model=model_id, reasoning_enabled=False), capabilities
+    ).reasoning_enabled is False
 
 
 def test_an_omitted_reasoning_field_is_absent_from_the_request(build):
@@ -226,6 +314,25 @@ def test_the_ceiling_is_not_enforced_against_a_model_nobody_described(
     options = OpenRouterOptions(model=model_id, max_tokens=200_000)
 
     assert PROVIDER.accept(options, capabilities).max_tokens == 200_000
+
+
+def test_no_effort_level_is_refused_on_behalf_of_a_model_nobody_described(
+    openrouter_registry,
+):
+    """The catalogue is the only source for what a model accepts, so a model
+    it has never heard of has not refused anything. Turned into a refusal,
+    "I do not know" would lock out every model on a machine that is offline
+    the first time the page is opened."""
+    (model_id,) = openrouter_registry("openai/gpt-5.4")
+    capabilities = PROVIDER.capabilities_for("openrouter/vendor/undescribed-1")
+
+    for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        assert capabilities.effort_refusal(level) == ""
+        assert capabilities.enabled_refusal(False) == ""
+    assert capabilities.offered_efforts() == REASONING_EFFORTS
+    assert PROVIDER.accept(
+        OpenRouterOptions(model=model_id, reasoning_effort="xhigh"), capabilities
+    ).reasoning_effort == "xhigh"
 
 
 def test_a_model_that_lists_no_reasoning_refuses_the_reasoning_controls(

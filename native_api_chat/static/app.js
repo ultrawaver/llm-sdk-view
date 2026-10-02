@@ -1308,9 +1308,8 @@ const PILL_DEFS = [
         id: 'reasoning_enabled', label: 'Enabled · reasoning.enabled',
         hint: 'three states: off is a request, untouched is not',
         html: (on) => selectHtml('menuReasoningEnabled',
-          [{ value: '', label: 'default' }, { value: 'true', label: 'true' },
-           { value: 'false', label: 'false' }],
-          byId('reasoningEnabled').value, on)
+                                 optionValues('reasoning_enabled'),
+                                 byId('reasoningEnabled').value, on)
       });
       menuField(fields, {
         id: 'reasoning_summary', label: 'Summary · reasoning.summary',
@@ -1323,6 +1322,10 @@ const PILL_DEFS = [
       wireMenuField(fields, '#menuReasoningTokens', 'reasoningMaxTokens');
       wireMenuField(fields, '#menuReasoningEnabled', 'reasoningEnabled');
       wireMenuField(fields, '#menuReasoningSummary', 'reasoningSummary');
+      // The one rule about these four fields that no single one of them owns:
+      // OpenRouter takes an effort or a token budget, never both. Said here,
+      // before the right pane has to refuse the combination.
+      menuNote(menu, esc(state.data.controls.reasoning_effort.note || ''));
     }
   },
   {
@@ -1417,18 +1420,30 @@ const PILL_DEFS = [
 /* "Leave this field out", in the word the server uses for it. */
 const OMITTED = 'default';
 
-/* The values a schema control offers, as {value,label} rows. */
+/* The values a schema control offers, as rows.
+
+   The wording is the schema's where it has any: a server that knows this
+   model reasons at "xhigh" by default can say so on the default row, and a
+   value it refuses arrives disabled, carrying the reason. Where the schema
+   says nothing more than the value, that is what is shown - which is what
+   every one of these rows looked like before. */
 function optionValues(id) {
   const control = controlOf(id);
   return ((control && control.options) || []).map((option) => ({
     value: option.value === OMITTED ? OMITTED : option.value,
-    label: option.value
+    label: option.label || option.value,
+    disabled: !!option.disabled,
+    note: option.note || ''
   }));
 }
 
+/* A disabled option is not a decoration: the browser will not let it be
+   picked, so a value the server refuses cannot arrive through the menu. */
 function selectHtml(id, options, current, enabled) {
   return '<select id="' + id + '"' + (enabled ? '' : ' disabled') + '>'
     + options.map((option) => '<option value="' + esc(option.value) + '"'
+        + (option.disabled ? ' disabled' : '')
+        + (option.note ? ' title="' + esc(option.note) + '"' : '')
         + (String(current) === String(option.value) ? ' selected' : '') + '>'
         + esc(option.label) + '</option>').join('')
     + '</select>';
@@ -2428,8 +2443,10 @@ function setOptions(select, options, labels) {
   options.forEach((option) => {
     const el = document.createElement('option');
     el.value = option.value;
-    el.textContent = labels[option.value] || option.value;
+    // The caller's own wording wins, then the schema's, then the raw value.
+    el.textContent = labels[option.value] || option.label || option.value;
     el.disabled = !!option.disabled;
+    if (option.note) el.title = option.note;
     select.appendChild(el);
   });
 }
@@ -2868,8 +2885,13 @@ function applyProviderChoices(data) {
 
 function applyOpenRouter(data) {
   const controls = data.controls;
+  // The three selects whose choices are the schema's own, and the Enabled
+  // select, which is one of them: whether `false` can be picked at all is a
+  // fact about the model, so the option list comes from the server rather
+  // than from a second copy of the three states written here.
   [['reasoningEffort', 'reasoning_effort'],
    ['reasoningSummary', 'reasoning_summary'],
+   ['reasoningEnabled', 'reasoning_enabled'],
    ['searchContextSize', 'search_context_size']].forEach(([id, key]) => {
     setOptions(byId(id), controls[key].options || [], {});
     byId(id).value = controls[key].value == null ? '' : controls[key].value;
@@ -2878,7 +2900,6 @@ function applyOpenRouter(data) {
       controls[key].unavailable_note || controls[key].note);
   });
   [['reasoningMaxTokens', 'reasoning_max_tokens'],
-   ['reasoningEnabled', 'reasoning_enabled'],
    ['routing', 'routing'],
    ['chatCompletions', 'chat_completions']].forEach(([id, key]) => {
     const value = data.defaults[key];

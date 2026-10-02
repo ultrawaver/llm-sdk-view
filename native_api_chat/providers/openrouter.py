@@ -24,7 +24,7 @@ around.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .. import openrouter_api, turn
@@ -187,6 +187,22 @@ REASONING_SUMMARIES = ("auto", "concise", "detailed")
 # default applies. Absence on the wire means the provider default applied -
 # never that a value was lost.
 OMITTED = "default"
+
+# The two forms of asking for reasoning, and what happens when a request
+# carries both. Measured rather than read: OpenRouter answers the combination
+# with 400 "Only one of \"reasoning.effort\" and \"reasoning.max_tokens\" can
+# be specified" (probed on a free model, 2026-10-02). The reasoning object
+# takes one or the other, so a form that let both through would be drawing a
+# request that cannot exist.
+EFFORT_AND_BUDGET = (
+    "OpenRouter accepts either reasoning.effort or reasoning.max_tokens, never "
+    'both. It answers the combination with 400: Only one of "reasoning.effort" '
+    'and "reasoning.max_tokens" can be specified'
+)
+
+# The same rule in the words a control's own note uses, so the two fields say
+# it before a refusal has to.
+ONE_FORM_OR_THE_OTHER = "OpenRouter takes effort or a token budget, never both"
 
 SEARCH_CONTEXT_SIZES = ("low", "medium", "high")
 
@@ -513,20 +529,20 @@ def _verify_reasoning(options: OpenRouterOptions, kwargs: dict, on_chat: bool) -
         if on_chat
         else kwargs.get("reasoning")
     ) or {}
-    for field, wanted, absent in (
+    for name, wanted, absent in (
         ("effort", options.reasoning_effort, OMITTED),
         ("max_tokens", options.reasoning_max_tokens, None),
         ("enabled", options.reasoning_enabled, None),
         ("summary", options.reasoning_summary, OMITTED),
     ):
         if wanted == absent:
-            if field in block:
+            if name in block:
                 raise ValueError(
-                    f"reasoning {field} was not asked for but the request carries it"
+                    f"reasoning {name} was not asked for but the request carries it"
                 )
-        elif block.get(field) != wanted:
+        elif block.get(name) != wanted:
             raise ValueError(
-                f"the request reasoning {field} is {block.get(field)!r}, not {wanted!r}"
+                f"the request reasoning {name} is {block.get(name)!r}, not {wanted!r}"
             )
 
 
@@ -567,6 +583,11 @@ class OpenRouterCapabilities:
     input_modalities: tuple[str, ...]
     data_source: str
     provenance: dict
+    # The catalogue's own ``reasoning`` object, kept verbatim: it is where a
+    # model states which effort levels it accepts and whether reasoning can be
+    # turned off at all. Empty when the entry carries none, which is a
+    # different fact from an entry that carries an empty one.
+    reasoning: dict = field(default_factory=dict)
 
     @property
     def described(self) -> bool:
@@ -628,6 +649,146 @@ class OpenRouterCapabilities:
             )
         return EDITABLE, ""
 
+    # --- what the model says about its own reasoning ----------------------
+    #
+    # The three methods below are the reason this record carries the raw
+    # `reasoning` object. OpenRouter does not describe every model the same
+    # way - some list their effort levels, some list none, some say reasoning
+    # cannot be turned off - and a form that offered the gateway's full set to
+    # all of them would be offering values that are silently mapped to the
+    # nearest one the model does accept, or refused outright.
+
+    @property
+    def reasoning_mandatory(self) -> bool:
+        """Whether the model refuses to have reasoning turned off.
+
+        `mandatory` is absent on most entries and false on many, so this asks
+        for `is True` rather than for truthiness: a missing key is not a fact
+        about the model.
+        """
+        return self.reasoning.get("mandatory") is True
+
+    @property
+    def default_effort(self) -> str | None:
+        """The level the catalogue says this model reasons at by default."""
+        return self.reasoning.get("default_effort")
+
+    @property
+    def listed_efforts(self) -> tuple[str, ...] | None:
+        """The levels the model itself lists, in the catalogue's own order.
+
+        ``None`` means the catalogue listed none - it had no entry, no
+        reasoning object, or a null list. A null list is documented as "all
+        gateway effort values are accepted", and the other two leave nothing
+        to narrow by, so in all three cases the control offers the gateway's
+        set. The list arrives highest-first and only ever from these seven, so
+        this is a filter rather than a translation, and its order is kept.
+        """
+        listed = self.reasoning.get("supported_efforts")
+        if not listed:
+            return None
+        return tuple(level for level in listed if level in REASONING_EFFORTS)
+
+    def offered_efforts(self) -> tuple[str, ...]:
+        """The levels this form may offer, which is not always all of them."""
+        levels = self.listed_efforts
+        if levels is None:
+            levels = REASONING_EFFORTS
+        if self.reasoning_mandatory:
+            # Documented: "do not send effort: \"none\" - the model rejects
+            # it". Leaving it out of the menu is what stops the form offering
+            # it; `accept` refuses it as well, for a form restored from a
+            # conversation that was sent before this rule existed.
+            return tuple(level for level in levels if level != "none")
+        return levels
+
+    def effort_refusal(self, level: str) -> str:
+        """Why this effort level cannot be sent, or "" when it can.
+
+        Two separate reasons, and they are not the same fact: a mandatory
+        model rejects `none` outright, while any other unsupported level is
+        accepted and *silently mapped down* to the nearest level the model
+        does take. The second is the one this project cannot live with - the
+        form would show one level and the model would reason at another.
+        """
+        if level == OMITTED:
+            return ""
+        if level == "none" and self.reasoning_mandatory:
+            return (
+                f"reasoning is mandatory for {self.slug}: OpenRouter's own model "
+                'metadata says not to send effort "none", because the model '
+                "rejects it"
+            )
+        listed = self.listed_efforts
+        if listed is None or level in listed:
+            return ""
+        return (
+            f"{self.slug} lists {', '.join(listed) or 'no level'} for "
+            "reasoning.effort (reasoning.supported_efforts). OpenRouter maps a "
+            "level the model does not support to the nearest one it does, so "
+            "sending this one would not be the request the form is showing"
+        )
+
+    def enabled_refusal(self, value: bool | None) -> str:
+        """Why reasoning.enabled cannot be this value, or "" when it can.
+
+        Measured rather than read. On a model whose metadata marks reasoning
+        mandatory, OpenRouter answers ``reasoning.enabled=false`` with 400
+        "Reasoning is mandatory for this endpoint and cannot be disabled."
+        (probed on a free model, 2026-10-02). `true` and "untouched" are both
+        fine there, so this is a refusal of one value and not of the control.
+        """
+        if value is not False or not self.reasoning_mandatory:
+            return ""
+        return (
+            f"reasoning is mandatory for {self.slug}: OpenRouter answers "
+            'reasoning.enabled=false with 400 "Reasoning is mandatory for this '
+            'endpoint and cannot be disabled."'
+        )
+
+    def effort_options(self) -> list[dict]:
+        """The Effort control's rows: the model's own levels, and the default.
+
+        `default` comes first and names the model's own default when the
+        catalogue reports one, so the row means something rather than standing
+        in for "we did not look".
+        """
+        default = self.default_effort
+        rows = [
+            {
+                "value": OMITTED,
+                "disabled": False,
+                "label": "default" + (f" (model default: {default})" if default else ""),
+            }
+        ]
+        rows += [{"value": level, "disabled": False} for level in self.offered_efforts()]
+        return rows
+
+    def enabled_options(self) -> list[dict]:
+        """The three states of reasoning.enabled, with `false` refused where it is.
+
+        A refused value stays in the list and is disabled, carrying its
+        reason: it is the one control with three states that are not two, and
+        a user who had `false` set before has to be able to see why it can no
+        longer be sent.
+        """
+        refused = self.enabled_refusal(False)
+        return [
+            {
+                "value": "",
+                "label": "default",
+                "disabled": False,
+                "note": "untouched: the model's own default state applies",
+            },
+            {"value": "true", "label": "true", "disabled": False},
+            {
+                "value": "false",
+                "label": "false",
+                "disabled": bool(refused),
+                "note": refused,
+            },
+        ]
+
     def price(self, key: str) -> float | None:
         """A per-token price, or None when the catalogue does not give one.
 
@@ -660,6 +821,11 @@ class OpenRouterCapabilities:
             "supported_parameters": sorted(self.supported_parameters),
             "input_modalities": list(self.input_modalities),
             "data_source": self.data_source,
+            # The page does not branch on this, and it is here for the same
+            # reason `supported_parameters` is: it is the model's own answer
+            # about itself, and it should be readable from the schema rather
+            # than only from the catalogue on disk.
+            "reasoning": self.reasoning,
         }
 
 
@@ -851,6 +1017,21 @@ class OpenRouterProvider:
                     f"{capabilities.slug} does not list tools as a supported "
                     "parameter, so it cannot be given a server-side tool"
                 )
+        # The rules that are about a value rather than about the field, and so
+        # cannot be read off the control's status: a level this model silently
+        # maps down to another, `enabled=false` on a model that refuses to be
+        # switched off, and the two forms of asking for reasoning at once.
+        for refusal in (
+            capabilities.effort_refusal(options.reasoning_effort),
+            capabilities.enabled_refusal(options.reasoning_enabled),
+        ):
+            if refusal:
+                raise UnsupportedOptionError(refusal)
+        if (
+            options.reasoning_effort != OMITTED
+            and options.reasoning_max_tokens is not None
+        ):
+            raise UnsupportedOptionError(EFFORT_AND_BUDGET)
         ceiling = capabilities.max_output_tokens
         if ceiling and options.max_tokens > ceiling:
             raise ValueError(
@@ -1074,18 +1255,31 @@ class OpenRouterProvider:
                 "reasoning_effort": {
                     **self._control("reasoning_effort", capabilities, transport),
                     "value": OMITTED,
-                    "options": option_list((OMITTED, *REASONING_EFFORTS)),
-                    "note": "sent as reasoning.effort; default leaves the field out",
+                    # The model's own list, not the gateway's. Offering all
+                    # seven to a model that lists three is how a form ends up
+                    # showing a level the turn does not reason at: OpenRouter
+                    # maps an unsupported effort to the nearest one it accepts.
+                    "options": capabilities.effort_options(),
+                    "note": (
+                        "sent as reasoning.effort; default leaves the field out. "
+                        + ONE_FORM_OR_THE_OTHER
+                    ),
                 },
                 "reasoning_max_tokens": {
                     **self._control("reasoning_max_tokens", capabilities, transport),
                     "value": None,
                     "min": 1,
-                    "note": "sent as reasoning.max_tokens; empty leaves the field out",
+                    "note": (
+                        "sent as reasoning.max_tokens; empty leaves the field out. "
+                        + ONE_FORM_OR_THE_OTHER
+                    ),
                 },
                 "reasoning_enabled": {
                     **self._control("reasoning_enabled", capabilities, transport),
                     "value": None,
+                    # Three states that are not two, and on a model that marks
+                    # reasoning mandatory the third is not on offer at all.
+                    "options": capabilities.enabled_options(),
                     "note": (
                         "sent as reasoning.enabled. Three states, not two: "
                         "off is a request, and untouched is not"
@@ -1318,4 +1512,5 @@ class OpenRouterProvider:
             input_modalities=tuple(architecture.get("input_modalities") or ()),
             data_source=CATALOGUE_SOURCE if entry else UNKNOWN_SOURCE,
             provenance=facts.provenance,
+            reasoning=dict((entry or {}).get("reasoning") or {}),
         )

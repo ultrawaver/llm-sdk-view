@@ -13,13 +13,17 @@ import json
 
 import llm
 import pytest
+from conftest import reasoning_entry
 
 from native_api_chat import openrouter_api
+from native_api_chat.chat import form_schema
 from native_api_chat.providers.openrouter import (
     CHAT_COMPLETIONS,
     EDITABLE,
     NOT_SENT_BY_PLUGIN,
+    REASONING_EFFORTS,
     RESPONSES,
+    STATUS_WORDS,
     UNKNOWN_TO_CATALOGUE,
     UNSUPPORTED_BY_MODEL,
     OpenRouterProvider,
@@ -231,6 +235,99 @@ def test_prices_come_with_the_models(openrouter_catalogue):
     assert capabilities.price("prompt") == 0.000002
     assert capabilities.price("completion") == 0.00001
     assert capabilities.price("input_cache_read") == 0.0000002
+
+
+# --- what the form offers, per model ----------------------------------------
+#
+# The catalogue states, per model, which effort levels it accepts and whether
+# reasoning can be switched off. These checks are about the form acting on
+# that: a menu is a claim about what can be sent, and offering the gateway's
+# whole set to a model that accepts three of them is a claim that is false.
+
+
+@pytest.fixture
+def model_form(openrouter_registry):
+    """The form for a model whose catalogue entry states its reasoning rules."""
+
+    def build(slug, efforts=None, mandatory=False, default=None):
+        (model_id,) = openrouter_registry(
+            reasoning_entry(slug, efforts, mandatory, default)
+        )
+        return form_schema(model_id)
+
+    return build
+
+
+def test_the_effort_menu_is_the_models_own_levels(model_form):
+    """The catalogue's list, in the catalogue's order (highest first), with
+    `default` first. Reordering it would be an editorial claim about a list we
+    are only relaying."""
+    form = model_form("vendor/three-levels-1", ["xhigh", "medium", "low"], default="xhigh")
+    options = form["controls"]["reasoning_effort"]["options"]
+
+    assert [option["value"] for option in options] == [
+        "default",
+        "xhigh",
+        "medium",
+        "low",
+    ]
+    assert options[0]["label"] == "default (model default: xhigh)"
+
+
+def test_a_mandatory_models_menu_does_not_offer_none(model_form):
+    """OpenRouter's own wording: "do not send effort: none - the model
+    rejects it". A level a model lists is kept; only `none` goes."""
+    form = model_form("vendor/mandatory-1", ["max", "high", "none"], mandatory=True)
+    values = [option["value"] for option in form["controls"]["reasoning_effort"]["options"]]
+
+    assert values == ["default", "max", "high"]
+
+
+def test_the_disable_state_is_taken_off_a_mandatory_models_menu(model_form):
+    """`reasoning.enabled=false` on a mandatory model is answered with 400
+    "Reasoning is mandatory for this endpoint and cannot be disabled.". The
+    value stays visible and disabled, so a conversation restored with it set
+    can say why it can no longer be sent."""
+    form = model_form("vendor/mandatory-1", ["max", "low"], mandatory=True)
+    options = form["controls"]["reasoning_enabled"]["options"]
+
+    assert [option["value"] for option in options] == ["", "true", "false"]
+    refused = options[2]
+    assert refused["disabled"] is True
+    assert "cannot be disabled" in refused["note"]
+    assert [option["disabled"] for option in options[:2]] == [False, False]
+
+
+def test_a_model_reasoning_is_optional_for_keeps_the_disable_state(model_form):
+    form = model_form("vendor/optional-1", ["high", "low"])
+    options = form["controls"]["reasoning_enabled"]["options"]
+
+    assert [option["disabled"] for option in options] == [False, False, False]
+
+
+def test_a_model_that_lists_no_levels_gets_the_gateways_own(model_form):
+    """Nothing was listed, so nothing is narrowed. The catalogue documents a
+    null list as "all gateway effort values are accepted", and an entry that
+    carries no reasoning object at all leaves nothing to filter by - so both
+    leave the full set on offer rather than an invented short one."""
+    form = model_form("vendor/quiet-1", None)
+
+    assert [
+        option["value"] for option in form["controls"]["reasoning_effort"]["options"]
+    ] == ["default", *REASONING_EFFORTS]
+    # And the control is still editable on such a model: it lists
+    # reasoning_effort as a parameter it accepts.
+    assert form["controls"]["reasoning_effort"]["status"] == STATUS_WORDS[EDITABLE]
+
+
+def test_both_fields_say_they_are_exclusive(model_form):
+    """OpenRouter takes an effort or a token budget, never both. The rule
+    belongs to the pair, so both controls' notes carry it."""
+    form = model_form("vendor/three-levels-1", ["high", "low"])
+    controls = form["controls"]
+
+    for key in ("reasoning_effort", "reasoning_max_tokens"):
+        assert "never both" in controls[key]["note"]
 
 
 @pytest.mark.parametrize("written", ["0", "", "-1", None, "nonsense"])

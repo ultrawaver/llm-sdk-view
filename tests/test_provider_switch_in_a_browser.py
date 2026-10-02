@@ -20,7 +20,7 @@ a throwaway directory, and the browser only ever loads localhost.
 """
 
 import pytest
-from conftest import catalogue_entry
+from conftest import catalogue_entry, reasoning_entry
 
 pytestmark = pytest.mark.browser
 
@@ -1015,4 +1015,137 @@ def test_both_cost_scopes_are_openrouter_too(sending, fake_openrouter):
     assert first["total"] == page.evaluate("(v) => money(v)", per_turn[0]), first
     assert first["total"] != second["total"], (first, second)
 
+    assert page.errors == []
+
+
+# --- the reasoning menu is a claim about the selected model -------------------
+#
+# An effort level the serving model does not accept is not refused by
+# OpenRouter: it is mapped down to the nearest level the model does take. So a
+# menu drawn from the gateway's whole set lets the form show one setting while
+# the turn runs at another, and no reading of app.js can say which list was
+# drawn. These are measured where they are drawn - in the option nodes
+# themselves, in both the form and the pill menu.
+
+#: A model that lists three of the gateway's seven levels, highest first, the
+#: way the catalogue returns them.
+LEVELS_MODEL = reasoning_entry(
+    "vendor/three-levels-2", ["xhigh", "medium", "low"], default="xhigh"
+)
+#: A model whose own metadata says reasoning cannot be turned off.
+MANDATORY_MODEL = reasoning_entry(
+    "vendor/mandatory-2", ["max", "high"], mandatory=True
+)
+
+
+@pytest.fixture
+def listed_levels(openrouter_registry, browser, live_app):
+    openrouter_registry(LEVELS_MODEL, "anthropic/claude-sonnet-5")
+    context = browser.new_context(viewport={"width": 1500, "height": 820})
+    page = context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.errors = errors
+    page.goto(live_app)
+    page.wait_for_selector('#settingsPills [data-pill="model"]')
+    page.wait_for_function("() => (state.data.provider.options || []).length > 1")
+    switch_to(page, "openrouter")
+    try:
+        yield page
+    finally:
+        context.close()
+
+
+@pytest.fixture
+def cannot_be_switched_off(openrouter_registry, browser, live_app):
+    openrouter_registry(MANDATORY_MODEL, "anthropic/claude-sonnet-5")
+    context = browser.new_context(viewport={"width": 1500, "height": 820})
+    page = context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.errors = errors
+    page.goto(live_app)
+    page.wait_for_selector('#settingsPills [data-pill="model"]')
+    page.wait_for_function("() => (state.data.provider.options || []).length > 1")
+    switch_to(page, "openrouter")
+    try:
+        yield page
+    finally:
+        context.close()
+
+
+def option_rows(page, selector: str) -> list:
+    """Each option as it really is: value, whether it can be picked, its title."""
+    return page.eval_on_selector_all(
+        selector, "els => els.map((el) => [el.value, el.disabled, el.title])"
+    )
+
+
+def test_the_effort_menu_is_this_models_own_list(listed_levels):
+    page = listed_levels
+    page.click('[data-pill="reasoning"]')
+    drawn = [row[0] for row in option_rows(page, "#menuEffort option")]
+
+    assert drawn == ["default", "xhigh", "medium", "low"]
+    # And the form's own select carries the same list: the menu is a second
+    # view of one control, not a second control.
+    assert [row[0] for row in option_rows(page, "#reasoningEffort option")] == drawn
+    assert page.errors == []
+
+
+def test_the_default_row_names_the_models_own_default(listed_levels):
+    """`default` means the field is left off, so the row has to say what the
+    model then does - otherwise it stands for "we did not look"."""
+    page = listed_levels
+    page.click('[data-pill="reasoning"]')
+
+    assert "xhigh" in page.text_content('#menuEffort option[value="default"]')
+
+
+def test_a_mandatory_models_off_switch_cannot_be_picked(cannot_be_switched_off):
+    """Measured against the API: `reasoning.enabled=false` there comes back
+    400 "Reasoning is mandatory for this endpoint and cannot be disabled." The
+    value stays on the menu and cannot be selected, carrying the reason."""
+    page = cannot_be_switched_off
+    rows = {row[0]: row for row in option_rows(page, "#reasoningEnabled option")}
+
+    assert rows["false"][1] is True
+    assert "cannot be disabled" in rows["false"][2]
+    assert rows[""][1] is False and rows["true"][1] is False
+    # The same three rows in the menu, with the same one refused.
+    page.click('[data-pill="reasoning"]')
+    in_menu = {row[0]: row for row in option_rows(page, "#menuReasoningEnabled option")}
+    assert in_menu["false"][1] is True
+    assert page.errors == []
+
+
+def test_none_is_not_on_a_mandatory_models_menu(cannot_be_switched_off):
+    page = cannot_be_switched_off
+    page.click('[data-pill="reasoning"]')
+    drawn = [row[0] for row in option_rows(page, "#menuEffort option")]
+
+    assert drawn == ["default", "max", "high"]
+
+
+def test_the_pane_refuses_an_effort_and_a_budget_together(listed_levels):
+    """The one combination the API itself rejects, refused before it is sent
+    and said in the pane rather than discovered as a 400 after Send.
+
+    Enter rather than a bare fill, because these menu fields commit on
+    `change`: a field that only listened for `input` would look like it had
+    been set while the request still carried nothing.
+    """
+    page = listed_levels
+    page.fill("#prompt", "hello")
+    page.click('[data-pill="reasoning"]')
+    page.select_option("#menuEffort", "medium")
+    page.wait_for_function("() => byId('reasoningEffort').value === 'medium'")
+    if not page.is_visible("#menuReasoningTokens"):
+        page.click('[data-pill="reasoning"]')
+    page.fill("#menuReasoningTokens", "2048")
+    page.keyboard.press("Enter")
+    assert page.input_value("#reasoningMaxTokens") == "2048"
+
+    page.wait_for_function("() => byId('codeStatus').textContent === 'cannot be sent'")
+    assert "never both" in page.text_content("#code")
     assert page.errors == []

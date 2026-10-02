@@ -1090,3 +1090,54 @@ turn. Cleared with the database it belongs to.
 - A schema test pins the wording, and two browser tests measure the real
   menu: editable with the cache-prefix hint on a new conversation, disabled
   with the conversation's own value and the lock reason once it has turns.
+
+### Fixed: the reasoning menu offered levels the model does not reason at
+
+- The Effort menu was drawn from `REASONING_EFFORTS`, the gateway's seven
+  levels, for every OpenRouter model. The catalogue states each model's own
+  `reasoning.supported_efforts`, and of the 192 entries that list one, 190
+  listed less than seven - `qwen/qwen3.8-27b:free` accepts `xhigh`, `medium`
+  and `low`, and the menu offered `none`, `minimal`, `high` and `max` as well.
+  OpenRouter's documented answer to an unsupported level is to **map it to the
+  nearest level the model does accept**, so the form and the turn could
+  disagree without anything failing: the pane showed a level the model never
+  reasoned at.
+- The menu is now the model's own list, in the catalogue's own order (highest
+  first), with `default` first and naming the model's own default effort when
+  the catalogue reports one - a `default` row that does not say what the model
+  then does is a row that means "we did not look". A level the model does not
+  list is refused in `accept()` as well, with the mapping rule as the reason,
+  because a form restored from an older turn can still hold one.
+- A model whose metadata marks reasoning **mandatory** - 117 of them - loses
+  the `none` level from the menu (OpenRouter's own wording: "do not send
+  `effort: none` - the model rejects it"), and its `reasoning.enabled=false`
+  option is drawn disabled and refused, because OpenRouter answers it with
+  400 "Reasoning is mandatory for this endpoint and cannot be disabled."
+  (measured, not read: probed on `liquid/lfm-2.5-2.6b:free`). The value stays
+  on the menu, disabled and carrying the reason, so a conversation restored
+  with it set can say why it can no longer be sent.
+- `reasoning.effort` and `reasoning.max_tokens` are one request written two
+  ways and are now refused together, quoting the API's own words: "Only one of
+  \"reasoning.effort\" and \"reasoning.max_tokens\" can be specified". The two
+  controls' notes say so before a refusal has to. The documentation
+  contradicts itself here - the use-cases page says "not both" while the
+  best-practices page says "instead of (or alongside)" - so this was settled
+  by asking the API rather than by choosing a page.
+- The page now takes its option labels, its disabled options and their reasons
+  from the schema, which is what makes the above visible: a disabled option is
+  rendered disabled, in both the form and the pill menu, and an option's reason
+  is its title. The three states of `reasoning.enabled` were written out in
+  `index.html` and again in `app.js`; there is now one copy, and it is the
+  server's.
+- Five tests: the menu's list and its `default` label, the mandatory model's
+  two refusals, the pair refusal, and - in a real browser - the drawn options
+  in both the form and the menu, the disabled `false`, and the pane saying
+  "cannot be sent" for the pair. Each rule was mutation-checked by removing it
+  from `openrouter.py` and watching the tests go red.
+- Not fixed, and measured: `reasoning_max_tokens` stays on offer for the 453
+  models whose entry omits `supports_max_tokens`. The documentation says of
+  that omission that the model "does not support token-budget reasoning",
+  which read literally would mean hiding the field - but a probe on one of
+  them had OpenRouter accept the budget and answer normally. That key is a
+  recommendation about how to draw a control, not a limit the endpoint
+  enforces, and hiding a field the API accepts would be its own false claim.

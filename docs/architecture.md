@@ -126,6 +126,20 @@ Two display rules fall out of the honesty rules:
   rebuild keeps a level the new list still offers and thinking still allows,
   and falls back to the provider's own level for one this model cannot send.
 
+OpenRouter's four reasoning controls are the same rule applied to a provider
+that states it per model. Its catalogue carries a `reasoning` object on the
+models that describe themselves, so the Effort menu is that model's
+`supported_efforts` - in the catalogue's own order, highest first - rather
+than the gateway's seven, and a level the model does not list is refused
+instead of being sent to be silently mapped down to the nearest one it does
+accept. On a model whose metadata marks reasoning mandatory, `none` is not on
+the menu and `reasoning.enabled=false` is shown disabled with its reason,
+because OpenRouter answers it 400. `effort` and `max_tokens` are one request
+written two ways and are refused together. All three were measured against the
+API rather than read off the documentation, which contradicts itself on the
+last one (`tests/test_openrouter_turn.py`, `tests/test_openrouter_catalogue.py`,
+and the menu itself in `tests/test_provider_switch_in_a_browser.py`).
+
 History shows each turn's settings through the same honesty lens: a hover card
 on the request bubble read from the turn's stored `effective_options` (a turn
 with no sidecar row says "not recorded"), a dashed divider between turns whose
